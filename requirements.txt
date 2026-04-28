@@ -1,0 +1,24 @@
+# RanOptics — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Core
+numpy
+plotly
+
+# GUI
+PySide6
+
+# Optional: PNG/PDF export
+kaleido
+
+# Backend: Tao/Bmad
+# pytao  — see https://github.com/bmad-sim/pytao for installation instructions
+
+# Backend: xsuite
+# xsuite  — see https://xsuite.readthedocs.io for installation instructions
+
+# Backend: ELEGANT
+# Requires elegant and sddsconvert on PATH — no Python package needed
+
+# Backend: MAD-X
+# No Python package needed — point RanOptics at twiss.tfs / survey.tfs output files

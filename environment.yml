@@ -1,0 +1,15 @@
+name: ranoptics
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - numpy
+  - plotly
+  - pyside6
+  - pip
+  - pip:
+      - kaleido
+      # Uncomment the backends you need:
+      # - pytao        # Tao/Bmad backend
+      # - xsuite       # xsuite backend
