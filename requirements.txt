@@ -12,7 +12,7 @@ PySide6
 kaleido
 
 # Backend: Tao/Bmad
-# pytao  — see https://github.com/bmad-sim/pytao for installation instructions
+pytao              # see https://github.com/bmad-sim/pytao for installation instructions
 
 # Backend: xsuite
 # xsuite  — see https://xsuite.readthedocs.io for installation instructions
