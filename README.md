@@ -34,7 +34,7 @@
 ### Python packages
 
 ```bash
-pip install numpy plotly PySide6 kaleido
+pip install numpy plotly PySide6 kaleido pytao
 ```
 
 Or with conda:
