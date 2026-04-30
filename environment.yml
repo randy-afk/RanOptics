@@ -11,5 +11,5 @@ dependencies:
   - pip:
       - kaleido
       # Uncomment the backends you need:
-      # - pytao        # Tao/Bmad backend
+      - pytao        # Tao/Bmad backend
       # - xsuite       # xsuite backend
