@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# ranoptics — Accelerator Optics Plotter  (PySide6 edition)
+# ranoptics — Accelerator Optics Plotter  (PySide6 edition)  v1.1.0
 # Version: 6.0
 #
 # Copyright (c) 2026 Randika Gamage
@@ -2445,63 +2445,147 @@ def _build_latdiff_panel(fig, elems_a, elems_b, label_a, label_b, row=1):
     ), row=row + 2, col=1)
 
 
-def _build_layout_bar(fig, elements, show_labels, row=4, show_markers=False):
+def _build_layout_bar(fig, elements, show_labels, row=4, show_markers=False, bar_lite=False):
     import plotly.graph_objects as go
     _MARKER_MONITOR_KEYS = {'marker','mark','monitor','hmon','vmon','instrument','bpm'}
     if not show_markers:
         elements = [e for e in elements if e['key'].lower() not in _MARKER_MONITOR_KEYS]
-    for elem in elements:
-        s0=elem['s_start']; L_=elem['length']; key=elem['key']
-        color=element_color(key); hover=make_hover(elem); short=elem['name'].split('\\')[-1]
-        kl=key.lower()
-        if L_==0:
-            # Zero-length element — thin vertical line
-            _zc = color or '#888888'
-            fig.add_shape(type='line',x0=s0,x1=s0,y0=-0.15,y1=0.15,
-                line=dict(color=_zc,width=1.5),row=row,col=1)
-            fig.add_trace(go.Scatter(x=[s0],y=[0.0],mode='markers',
-                marker=dict(size=8,color=_zc,opacity=0),name=short,
-                showlegend=False,hovertemplate=hover),row=row,col=1)
-            continue
-        if color is None: continue
-        if L_<THIN_ELEMENT_THRESHOLD:
-            fig.add_shape(type='line',x0=s0,x1=s0,y0=-0.1,y1=0.1,
-                line=dict(color=color,width=1.5),row=row,col=1)
-            fig.add_trace(go.Scatter(x=[s0],y=[0.0],mode='markers',
+
+    if bar_lite:
+        # ── Lite mode: use exact same two-trace method as floor plan ──────────
+        # Elements laid out linearly (theta=0). No bends, no dead-reckoning.
+        # One invisible hover line + one visible polygon per element, same as
+        # _build_floor_plan. No add_shape calls at all.
+        import plotly.graph_objects as go
+        th = 0.2  # fixed element thickness for bar
+        la = set()
+        _lt = {'quadrupole':'Quadrupole','sbend':'Dipole','sextupole':'Sextupole',
+               'kicker':'Kicker','hkicker':'Kicker','vkicker':'Kicker',
+               'monitor':'Monitor','rfcavity':'RF Cavity','lcavity':'RF Cavity'}
+        _lg = f'bar_lite_{row}'
+        for elem in elements:
+            s0=elem['s_start']; L_=elem['length']; key=elem['key']
+            color=element_color(key); kl=key.lower()
+            hover=make_hover(elem)
+            ll=_lt.get(kl)
+            if L_==0:
+                if color is None: continue
+                fig.add_trace(go.Scatter(
+                    x=[s0,s0], y=[-th/2, th/2], mode='lines',
+                    line=dict(color=color, width=2),
+                    hoverlabel=dict(bgcolor=color),
+                    legendgroup=f'{_lg}_{ll or key}', showlegend=False,
+                    hovertemplate=hover), row=row, col=1)
+                continue
+            if color is None: continue
+            if L_<THIN_ELEMENT_THRESHOLD:
+                fig.add_trace(go.Scatter(
+                    x=[s0,s0], y=[-th/2, th/2], mode='lines',
+                    line=dict(color=color, width=2),
+                    hoverlabel=dict(bgcolor=color),
+                    legendgroup=f'{_lg}_{ll or key}', showlegend=False,
+                    hovertemplate=hover), row=row, col=1)
+                continue
+            if 'rfcavity' in kl or 'lcavity' in kl:
+                ov_x, ov_y = element_oval(s0, 0.0, 0.0, L_, th/2)
+                # Trace 1: invisible hover line
+                fig.add_trace(go.Scatter(
+                    x=[s0, s0+L_], y=[0.0, 0.0], mode='lines',
+                    line=dict(color='rgba(0,0,0,0)', width=max(8, th*60)),
+                    hoverlabel=dict(bgcolor=color),
+                    legendgroup=f'{_lg}_h_{ll or "o"}', showlegend=False,
+                    hovertemplate=hover), row=row, col=1)
+                # Trace 2: visible oval
+                fig.add_trace(go.Scatter(
+                    x=ov_x, y=ov_y, mode='lines', fill='toself',
+                    fillcolor=color, line=dict(color=color, width=0),
+                    opacity=0.8, name=ll, legendgroup=f'{_lg}_{ll or "o"}',
+                    showlegend=False, hoverinfo='skip'), row=row, col=1)
+                continue
+            if 'quadrupole' in kl:
+                pol = elem.get('profile', 0.0) or elem.get('k1', 0.0)
+                y0v=0.0 if pol>0 else (-0.2 if pol<0 else -0.1)
+                y1v=0.2 if pol>0 else (0.0  if pol<0 else  0.1)
+            elif 'sextupole' in kl:
+                pol = elem.get('k2', 0.0)
+                y0v=0.0 if pol>0 else (-0.2 if pol<0 else -0.1)
+                y1v=0.2 if pol>0 else (0.0  if pol<0 else  0.1)
+            else:
+                y0v,y1v=-th/2,th/2
+            ymid=(y0v+y1v)/2.0
+            # Trace 1: invisible wide hover line over full element length
+            fig.add_trace(go.Scatter(
+                x=[s0, s0+L_], y=[ymid, ymid], mode='lines',
+                line=dict(color='rgba(0,0,0,0)', width=max(8, abs(y1v-y0v)*60)),
+                hoverlabel=dict(bgcolor=color),
+                legendgroup=f'{_lg}_h_{ll or "o"}', showlegend=False,
+                hovertemplate=hover), row=row, col=1)
+            # Trace 2: visible filled polygon — hoverinfo skip
+            rx=[s0, s0+L_, s0+L_, s0, s0]
+            ry=[y0v, y0v, y1v, y1v, y0v]
+            fig.add_trace(go.Scatter(
+                x=rx, y=ry, mode='lines', fill='toself',
+                fillcolor=color, line=dict(color='black', width=0.5),
+                opacity=0.8, name=ll, legendgroup=f'{_lg}_{ll or "o"}',
+                showlegend=False, hoverinfo='skip'), row=row, col=1)
+    else:
+        # ── Standard mode — original add_shape + invisible point scatter ──────
+        for elem in elements:
+            s0=elem['s_start']; L_=elem['length']; key=elem['key']
+            color=element_color(key); hover=make_hover(elem); short=elem['name'].split('\\')[-1]
+            kl=key.lower()
+            if L_==0:
+                # Zero-length element — thin vertical line
+                _zc = color or '#888888'
+                fig.add_shape(type='line',x0=s0,x1=s0,y0=-0.15,y1=0.15,
+                    line=dict(color=_zc,width=1.5),row=row,col=1)
+                fig.add_trace(go.Scatter(x=[s0],y=[0.0],mode='markers',
+                    marker=dict(size=8,color=_zc,opacity=0),name=short,
+                    showlegend=False,hovertemplate=hover),row=row,col=1)
+                continue
+            if color is None: continue
+            if L_<THIN_ELEMENT_THRESHOLD:
+                fig.add_shape(type='line',x0=s0,x1=s0,y0=-0.1,y1=0.1,
+                    line=dict(color=color,width=1.5),row=row,col=1)
+                fig.add_trace(go.Scatter(x=[s0],y=[0.0],mode='markers',
+                    marker=dict(size=8,color=color,opacity=0),name=short,
+                    showlegend=False,hovertemplate=hover),row=row,col=1)
+                continue
+            if 'rfcavity' in kl or 'lcavity' in kl:
+                ov_x, ov_y = element_oval(s0, 0.0, 0.0, L_, 0.1)
+                fig.add_trace(go.Scatter(x=ov_x, y=ov_y,
+                    mode='lines',fill='toself',fillcolor=color,line=dict(color='black',width=0.5),
+                    opacity=0.8,name=short,showlegend=False,hoverinfo='skip'),row=row,col=1)
+                fig.add_trace(go.Scatter(x=[s0+L_/2],y=[0.0],mode='markers',
+                    marker=dict(size=8,color=color,opacity=0),name=short,
+                    showlegend=False,hovertemplate=hover),row=row,col=1)
+                continue
+            if 'quadrupole' in kl:
+                pol = elem.get('profile', 0.0) or elem.get('k1', 0.0)
+                y0v=0.0 if pol>0 else (-0.2 if pol<0 else -0.1)
+                y1v=0.2 if pol>0 else (0.0  if pol<0 else  0.1)
+            elif 'sextupole' in kl:
+                pol = elem.get('k2', 0.0)
+                y0v=0.0 if pol>0 else (-0.2 if pol<0 else -0.1)
+                y1v=0.2 if pol>0 else (0.0  if pol<0 else  0.1)
+            else: y0v,y1v=-0.1,0.1
+            fig.add_shape(type='rect',x0=s0,x1=s0+L_,y0=y0v,y1=y1v,
+                line=dict(color='black',width=0.5),fillcolor=color,opacity=0.8,row=row,col=1)
+            fig.add_trace(go.Scatter(x=[s0+L_/2],y=[y0v+(y1v-y0v)/2],mode='markers',
                 marker=dict(size=8,color=color,opacity=0),name=short,
                 showlegend=False,hovertemplate=hover),row=row,col=1)
-            continue
-        if 'rfcavity' in kl or 'lcavity' in kl:
-            cx=s0+L_/2; a=L_/2; b=0.1; t=np.linspace(0,2*np.pi,37)
-            fig.add_trace(go.Scatter(x=(cx+a*np.cos(t)).tolist(),y=(b*np.sin(t)).tolist(),
-                mode='lines',fill='toself',fillcolor=color,line=dict(color='black',width=0.5),
-                opacity=0.8,name=short,showlegend=False,hoverinfo='skip'),row=row,col=1)
-            fig.add_trace(go.Scatter(x=[cx],y=[0.0],mode='markers',
-                marker=dict(size=8,color=color,opacity=0),name=short,
-                showlegend=False,hovertemplate=hover),row=row,col=1)
-            continue
-        if 'quadrupole' in kl:
-            pol = elem.get('profile', 0.0) or elem.get('k1', 0.0)
-            y0v=0.0 if pol>0 else (-0.2 if pol<0 else -0.1)
-            y1v=0.2 if pol>0 else (0.0  if pol<0 else  0.1)
-        elif 'sextupole' in kl:
-            pol = elem.get('k2', 0.0)
-            y0v=0.0 if pol>0 else (-0.2 if pol<0 else -0.1)
-            y1v=0.2 if pol>0 else (0.0  if pol<0 else  0.1)
-        else: y0v,y1v=-0.1,0.1
-        fig.add_shape(type='rect',x0=s0,x1=s0+L_,y0=y0v,y1=y1v,
-            line=dict(color='black',width=0.5),fillcolor=color,opacity=0.8,row=row,col=1)
-        fig.add_trace(go.Scatter(x=[s0+L_/2],y=[y0v+(y1v-y0v)/2],mode='markers',
-            marker=dict(size=8,color=color,opacity=0),name=short,
-            showlegend=False,hovertemplate=hover),row=row,col=1)
     if show_labels:
         xref=fig.get_subplot(row,1).xaxis.plotly_name.replace('axis','')
         yref=fig.get_subplot(row,1).yaxis.plotly_name.replace('axis','')
+        new_annots = []
         for elem in elements:
             if elem['key'].lower() not in ('quadrupole','sbend') or elem['length']==0: continue
-            fig.add_annotation(x=elem['s_start']+elem['length']/2,y=0.15,
-                text=elem['name'].split('\\')[-1],showarrow=False,textangle=-90,
-                font=dict(size=7),xref=xref,yref=yref)
+            new_annots.append(dict(
+                x=elem['s_start']+elem['length']/2, y=0.15,
+                text=elem['name'].split('\\')[-1], showarrow=False, textangle=-90,
+                font=dict(size=7), xref=xref, yref=yref))
+        existing_annots = list(fig.layout.annotations) if fig.layout.annotations else []
+        fig.update_layout(annotations=existing_annots + new_annots)
 
 def _build_bar_annotations(fig, elements, pattern, row, annot_font_size=8):
     """Add wildcard annotations to the beamline bar panel."""
@@ -2527,8 +2611,21 @@ def _build_bar_annotations(fig, elements, pattern, row, annot_font_size=8):
             font=dict(size=annot_font_size, color='#a0a0c0'),
         )
 
+def _make_elem_name_array(s, elements):
+    """Return an array of element names, one per s point.
+    Each s value (s_end of element) is matched to its element by index.
+    Falls back to empty string if no match found.
+    """
+    names = np.empty(len(s), dtype=object)
+    names[:] = ''
+    for e in elements:
+        s0 = e['s_start']; s1 = s0 + e['length']; ename = e['name'].split('\\')[-1]
+        mask = (s >= s0) & (s <= s1 + 1e-9)
+        names[mask] = ename
+    return names
+
 def _dot_trace(fig, x, y, name, color, legend_name, legendgroup, row, col,
-               hovertemplate='', secondary_y=False):
+               hovertemplate='', secondary_y=False, customdata=None):
     """Add a line trace using a colored dot as the legend symbol."""
     import plotly.graph_objects as go
     # Dummy single-point trace for the legend dot
@@ -2538,13 +2635,23 @@ def _dot_trace(fig, x, y, name, color, legend_name, legendgroup, row, col,
         legend=legend_name, legendgroup=legendgroup, showlegend=True,
         hoverinfo='skip'),
         row=row, col=col, **({'secondary_y': secondary_y} if secondary_y is not None else {}))
-    # Real line trace — no legend entry
-    fig.add_trace(go.Scatter(
-        x=x, y=y, name=name, mode='lines',
-        line=dict(color=color),
-        legend=legend_name, legendgroup=legendgroup, showlegend=False,
-        hovertemplate=hovertemplate),
-        row=row, col=col, **({'secondary_y': secondary_y} if secondary_y is not None else {}))
+    # If element names provided, append to hover and attach as customdata
+    if customdata is not None:
+        ht = hovertemplate.replace('<extra></extra>', '<br>%{customdata}<extra></extra>')
+        fig.add_trace(go.Scatter(
+            x=x, y=y, name=name, mode='lines',
+            line=dict(color=color),
+            customdata=customdata,
+            legend=legend_name, legendgroup=legendgroup, showlegend=False,
+            hovertemplate=ht),
+            row=row, col=col, **({'secondary_y': secondary_y} if secondary_y is not None else {}))
+    else:
+        fig.add_trace(go.Scatter(
+            x=x, y=y, name=name, mode='lines',
+            line=dict(color=color),
+            legend=legend_name, legendgroup=legendgroup, showlegend=False,
+            hovertemplate=hovertemplate),
+            row=row, col=col, **({'secondary_y': secondary_y} if secondary_y is not None else {}))
 
 # Dataset registry — maps (type, axis) → (data_getter, label, color, unit, fmt)
 # data_getter receives the data_dict and returns a numpy array
@@ -2645,7 +2752,7 @@ def _get_dataset(dtype, axis, s, ba, bb, ex, ey, ox, oy, pa, pb,
     return y, name, color, fmt
 
 def _build_custom_panel(fig, spec, s, ba, bb, ex, ey, ox, oy, pa, pb,
-                        al_a, al_b, beam_params, row, legend_name):
+                        al_a, al_b, beam_params, row, legend_name, elem_names=None):
     """Build a user-composed panel from a custom spec dict.
 
     spec = {
@@ -2672,7 +2779,7 @@ def _build_custom_panel(fig, spec, s, ba, bb, ex, ey, ox, oy, pa, pb,
         color = color_map[(dtype, axis)]
         _dot_trace(fig, s, y, name, color, legend_name, name, row, 1,
                    hovertemplate=f's=%{{x:.3f}} m<br>{fmt}<extra></extra>',
-                   secondary_y=False)
+                   secondary_y=False, customdata=elem_names)
 
     for dtype, axis in y2_ds:
         y, name, _, fmt = _get_dataset(dtype, axis, s, ba, bb, ex, ey,
@@ -2680,7 +2787,7 @@ def _build_custom_panel(fig, spec, s, ba, bb, ex, ey, ox, oy, pa, pb,
         color = color_map[(dtype, axis)]
         _dot_trace(fig, s, y, name, color, legend_name, name, row, 1,
                    hovertemplate=f's=%{{x:.3f}} m<br>{fmt}<extra></extra>',
-                   secondary_y=True)
+                   secondary_y=True, customdata=elem_names)
 
     y1_label = _axis_label_from_datasets(y1_ds) if y1_ds else ''
     y2_label = _axis_label_from_datasets(y2_ds) if y2_ds else None
@@ -2786,7 +2893,7 @@ def _build_expr_panel(fig, spec, data, code, s, row, legend_name,
     y1_label = y1_axis_label or (y1_exprs[0] if y1_exprs else '')
     return y1_label, y2_label
 
-def _build_twiss_panel(fig, s, ba, bb, ex, ey, row=2, legend_name='legend1'):
+def _build_twiss_panel(fig, s, ba, bb, ex, ey, row=2, legend_name='legend1', elem_names=None):
     import plotly.graph_objects as go
     for y,name,col,sec,fmt in [
         (ba,'βₓ','blue',False,'βₓ=%{y:.3f} m'),
@@ -2795,28 +2902,33 @@ def _build_twiss_panel(fig, s, ba, bb, ex, ey, row=2, legend_name='legend1'):
         (ey,'ηᵧ','brown',True,'ηᵧ=%{y:.4f} m'),
     ]:
         _dot_trace(fig, s, y, name, col, legend_name, name, row, 1,
-            hovertemplate=f's=%{{x:.3f}} m<br>{fmt}<extra></extra>', secondary_y=sec)
+            hovertemplate=f's=%{{x:.3f}} m<br>{fmt}<extra></extra>', secondary_y=sec,
+            customdata=elem_names)
 
-def _build_beta_panel(fig, s, ba, bb, row=2, legend_name='legend1'):
+def _build_beta_panel(fig, s, ba, bb, row=2, legend_name='legend1', elem_names=None):
     import plotly.graph_objects as go
     for y,name,col in [(ba,'βₓ','blue'),(bb,'βᵧ','red')]:
         _dot_trace(fig, s, y, name, col, legend_name, name, row, 1,
-            hovertemplate=f's=%{{x:.3f}} m<br>{name}=%{{y:.3f}} m<extra></extra>')
+            hovertemplate=f's=%{{x:.3f}} m<br>{name}=%{{y:.3f}} m<extra></extra>',
+            customdata=elem_names)
 
-def _build_dispersion_panel(fig, s, ex, ey, row=2, legend_name='legend1'):
+def _build_dispersion_panel(fig, s, ex, ey, row=2, legend_name='legend1', elem_names=None):
     import plotly.graph_objects as go
     for y,name,col in [(ex,'ηₓ','green'),(ey,'ηᵧ','brown')]:
         _dot_trace(fig, s, y, name, col, legend_name, name, row, 1,
-            hovertemplate=f's=%{{x:.3f}} m<br>{name}=%{{y:.4f}} m<extra></extra>')
+            hovertemplate=f's=%{{x:.3f}} m<br>{name}=%{{y:.4f}} m<extra></extra>',
+            customdata=elem_names)
 
-def _build_alpha_panel(fig, s, al_a, al_b, row=2, legend_name='legend1'):
+def _build_alpha_panel(fig, s, al_a, al_b, row=2, legend_name='legend1', elem_names=None):
     import plotly.graph_objects as go
     for y,name,col in [(al_a,'αₓ','blue'),(al_b,'αᵧ','red')]:
         _dot_trace(fig, s, y, name, col, legend_name, name, row, 1,
-            hovertemplate=f's=%{{x:.3f}} m<br>{name}=%{{y:.4f}}<extra></extra>')
+            hovertemplate=f's=%{{x:.3f}} m<br>{name}=%{{y:.4f}}<extra></extra>',
+            customdata=elem_names)
 
 def _build_panel3(fig, panel3, s, ba, bb, ex, ey, ox, oy, pa, pb,
-                  row=3, legend_name='legend2', row3_secondary=False, beam_params=None):
+                  row=3, legend_name='legend2', row3_secondary=False, beam_params=None,
+                  elem_names=None):
     import plotly.graph_objects as go
     bp=beam_params or {}
     # Expression panel spec
@@ -2828,15 +2940,18 @@ def _build_panel3(fig, panel3, s, ba, bb, ex, ey, ox, oy, pa, pb,
         al_a = bp.get('alpha_a', np.zeros_like(s))
         al_b = bp.get('alpha_b', np.zeros_like(s))
         return _build_custom_panel(fig, panel3, s, ba, bb, ex, ey, ox, oy,
-                                   pa, pb, al_a, al_b, bp, row, legend_name)
+                                   pa, pb, al_a, al_b, bp, row, legend_name,
+                                   elem_names=elem_names)
     if panel3=='phase':
         for y,n,c in [(pa,'μₓ','blue'),(pb,'μᵧ','red')]:
             _dot_trace(fig, s, y, n, c, legend_name, n, row, 1,
-                hovertemplate=f's=%{{x:.3f}} m<br>{n}=%{{y:.4f}}<extra></extra>')
+                hovertemplate=f's=%{{x:.3f}} m<br>{n}=%{{y:.4f}}<extra></extra>',
+                customdata=elem_names)
     elif panel3=='orbit':
         for y,n,c in [(ox,'x orbit','blue'),(oy,'y orbit','red')]:
             _dot_trace(fig, s, y, n, c, legend_name, n, row, 1,
-                hovertemplate=f's=%{{x:.3f}} m<br>{n}=%{{y:.6f}} m<extra></extra>')
+                hovertemplate=f's=%{{x:.3f}} m<br>{n}=%{{y:.6f}} m<extra></extra>',
+                customdata=elem_names)
     elif panel3=='beamsize':
         ex_v=bp.get('emit_x',0.0); ey_v=bp.get('emit_y',0.0); sdp=bp.get('sigma_dp',0.0)
         n_sig=bp.get('n_sigma',1.0)
@@ -2845,21 +2960,22 @@ def _build_panel3(fig, panel3, s, ba, bb, ex, ey, ox, oy, pa, pb,
         n_lbl = f'{n_sig:.4g}·' if n_sig != 1.0 else ''
         for y,n,c in [(sx,f'{n_lbl}σₓ','blue'),(sy,f'{n_lbl}σᵧ','red')]:
             _dot_trace(fig, s, y, n, c, legend_name, n, row, 1,
-                hovertemplate=f's=%{{x:.3f}} m<br>{n}=%{{y:.4f}} mm<extra></extra>')
+                hovertemplate=f's=%{{x:.3f}} m<br>{n}=%{{y:.4f}} mm<extra></extra>',
+                customdata=elem_names)
     elif panel3=='twiss':
-        _build_twiss_panel(fig,s,ba,bb,ex,ey,row=row,legend_name=legend_name)
+        _build_twiss_panel(fig,s,ba,bb,ex,ey,row=row,legend_name=legend_name,elem_names=elem_names)
     elif panel3=='beta':
-        _build_beta_panel(fig,s,ba,bb,row=row,legend_name=legend_name)
+        _build_beta_panel(fig,s,ba,bb,row=row,legend_name=legend_name,elem_names=elem_names)
     elif panel3=='dispersion':
-        _build_dispersion_panel(fig,s,ex,ey,row=row,legend_name=legend_name)
+        _build_dispersion_panel(fig,s,ex,ey,row=row,legend_name=legend_name,elem_names=elem_names)
     elif panel3=='alpha':
         al_a=beam_params.get('alpha_a',np.zeros_like(s)) if bp else np.zeros_like(s)
         al_b=beam_params.get('alpha_b',np.zeros_like(s)) if bp else np.zeros_like(s)
-        _build_alpha_panel(fig,s,al_a,al_b,row=row,legend_name=legend_name)
+        _build_alpha_panel(fig,s,al_a,al_b,row=row,legend_name=legend_name,elem_names=elem_names)
 
 def _build_panel3_uni(fig, panel3, s, ba, bb, ex, ey, ox, oy, pa, pb,
                       al_a, al_b, beam_params, row, legend_name,
-                      uni_label='u1', palette=None, uni_idx=0):
+                      uni_label='u1', palette=None, uni_idx=0, elem_names=None):
     """Like _build_panel3 but tags every trace with the universe label
     and uses palette colors for visual distinction."""
     import plotly.graph_objects as go
@@ -2873,7 +2989,7 @@ def _build_panel3_uni(fig, panel3, s, ba, bb, ex, ey, ox, oy, pa, pb,
         tagged = _tagged(name)
         _dot_trace(fig, s, y, tagged, color, legend_name, tagged, row, 1,
                    hovertemplate=f's=%{{x:.3f}} m<br>{tagged}=%{{y:.6g}}<extra></extra>',
-                   secondary_y=sec)
+                   secondary_y=sec, customdata=elem_names)
 
     if isinstance(panel3, dict):
         # Custom panel — assign palette colors by position
@@ -3303,6 +3419,7 @@ def plot_optics(
     color_beampipes=False,  # if True, each universe beampipe gets a distinct calm color
     show_markers=False,      # if True, show markers/monitors in floor plan
     show_markers_bar=False,  # if True, show markers/monitors in beamline bar
+    bar_lite=False,          # if True, use floor-plan two-trace method for beamline bar (faster on large lattices)
     show_xz=True,     # show X vs Z floor plan (floor layout)
     show_yz=True,     # show Y vs Z floor plan (floor layout)
     show_titles=True, # show subplot titles
@@ -3930,6 +4047,8 @@ def plot_optics(
         # Data panels
         first_s_row = current_row
         _tune_annotated = False  # only annotate once on first data panel
+        # In lite mode build element name lookup array once for all panels
+        _elem_names = _make_elem_name_array(s, elements) if bar_lite else None
         for i, p in enumerate(panels):
             _prog(55 + int(30 * i / max(len(panels), 1)), f'Building panel: {p}...')
             legend_n      = f'legend{i+1}'
@@ -3945,8 +4064,7 @@ def plot_optics(
             # ── Beamline bar panel ────────────────────────────────────────
             if p == 'bar':
                 _build_layout_bar(fig, elements, show_element_labels, row=current_row,
-                                  show_markers=show_markers_bar)
-                # Wildcard annotations on bar
+                                  show_markers=show_markers_bar, bar_lite=bar_lite)
                 _bar_annot = (panel_annotations or {}).get(i, '')
                 if not _bar_annot and isinstance(p, dict):
                     _bar_annot = p.get('annot_pattern', '').strip()
@@ -4041,13 +4159,13 @@ def plot_optics(
                         _ual_a, _ual_b, _ubp,
                         row=current_row, legend_name=legend_n,
                         uni_label=_ulbl, palette=_pal,
-                        uni_idx=_ui)
+                        uni_idx=_ui, elem_names=_elem_names)
             else:
                 # ── Single universe: original path ────────────────────────────
                 result = _build_panel3(fig, p, s, ba, bb, ex, ey, ox, oy, pa, pb,
                               row=current_row, legend_name=legend_n,
                               row3_secondary=has_secondary,
-                              beam_params=bp_full)
+                              beam_params=bp_full, elem_names=_elem_names)
 
             # y-axis labels
             if isinstance(p, dict):
@@ -4351,14 +4469,14 @@ def plot_optics(
                 bar_fig.update_layout(height=80 + n_grp * 100,
                                       title=dict(text='Beamline', x=0.5, xanchor='center'))
                 _build_layout_bar(bar_fig, elements, show_element_labels, row=1,
-                                  show_markers=show_markers_bar)
+                                  show_markers=show_markers_bar, bar_lite=bar_lite)
                 bar_fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
                                      row=1, col=1)
                 bar_fig.update_yaxes(title_text='', showticklabels=False,
                                      range=[-0.4, 0.4], row=1, col=1)
                 for ri, c in enumerate(_csep, start=2):
                     _build_layout_bar(bar_fig, c['elems'], show_element_labels, row=ri,
-                                      show_markers=show_markers_bar)
+                                      show_markers=show_markers_bar, bar_lite=bar_lite)
                     bar_fig.update_yaxes(title_text='', showticklabels=False,
                                          range=[-0.4, 0.4], row=ri, col=1)
                 if not hasattr(fig, '_compare_figs'): fig._compare_figs = []
@@ -5084,7 +5202,7 @@ class _FodoLogo(QWidget):
         # betax curve
         pts_x = [QPointF(lx(32 + i / 80 * 104), ly(67 - 20 * math.cos(math.pi * 2 * i / 80)))
                  for i in range(81)]
-        pen = QPen(QColor(RAN_CLR), 2); pen.setCapStyle(Qt.RoundCap)
+        pen = QPen(QColor(ACCENT), 2); pen.setCapStyle(Qt.RoundCap)
         p.setPen(pen)
         for i in range(len(pts_x) - 1): p.drawLine(pts_x[i], pts_x[i + 1])
         # betay curve
@@ -5097,8 +5215,8 @@ class _FodoLogo(QWidget):
         ey = ly(106); eh = max(3, int(9 * sy))
         from PySide6.QtCore import QRectF
         for ex_, ew, col, lbl_text in [
-            (30, 18, RAN_CLR, 'F'), (48, 30, None, None),
-            (78, 18, ERROR, 'D'), (96, 30, None, None), (126, 18, RAN_CLR, 'F')
+            (30, 18, ACCENT, 'F'), (48, 30, None, None),
+            (78, 18, ERROR, 'D'), (96, 30, None, None), (126, 18, ACCENT, 'F')
         ]:
             x1 = lx(ex_); x2 = lx(ex_ + ew)
             if col is None:
@@ -5244,7 +5362,7 @@ class LuxV4GUI(QMainWindow):
         opt = QLabel("Optics"); opt.setFont(FONT_HDR); opt.setStyleSheet(f"color: {ERROR}; background: transparent; letter-spacing: 2px;")
         nr.addWidget(ran); nr.addWidget(opt); nr.addStretch()
         tv.addWidget(name_row)
-        sub = QLabel("Accelerator Optics Plotter"); sub.setFont(FONT_SMALL)
+        sub = QLabel("Accelerator Optics Plotter  •  v1.1.0"); sub.setFont(FONT_SMALL)
         sub.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
         tv.addWidget(sub)
         row.addWidget(txt)
@@ -5252,8 +5370,8 @@ class LuxV4GUI(QMainWindow):
 
         rf = QWidget(); rf.setStyleSheet("background: transparent;")
         rv = QVBoxLayout(rf); rv.setContentsMargins(0,0,0,0); rv.setSpacing(2)
-        for t in ("Author: Randika Gamage (randika@jlab.org)", "Support: It worked on my machine."):
-            l = QLabel(t); l.setFont(FONT_SMALL); l.setAlignment(Qt.AlignLeft)
+        for t in ("For questions do NOT contact Randika", "Send bug reports to randika@jlab.org"):
+            l = QLabel(t); l.setFont(FONT_SMALL); l.setAlignment(Qt.AlignRight)
             l.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
             rv.addWidget(l)
         row.addWidget(rf)
@@ -5625,6 +5743,9 @@ class LuxV4GUI(QMainWindow):
         _help(layout, "Annotates Qₓ, Qᵧ, Qₓ', Qᵧ' on the first panel.")
         r = _row(layout)
         self.w_show_titles = _chk(r, "Show panel titles"); self.w_show_titles.setChecked(True)
+        r = _row(layout)
+        self.w_bar_lite = _chk(r, "Beamline bar lite")
+        _help(layout, "Faster beamline bar rendering for large lattices. Uses the same two-trace method as the floor plan.")
         r = _row(layout); _lbl(r, "Panel spacing (px)")
         self.w_panel_spacing = _ent(r, width=60, placeholder="80"); self.w_panel_spacing.setText("80")
         _hint(r, "pixels between panels")
@@ -6196,6 +6317,7 @@ class LuxV4GUI(QMainWindow):
             tunnel_wall_file=self.w_tunnel_file.text().strip() or None,
             show_markers=self.w_show_markers.isChecked(),
             show_markers_bar=self.w_show_markers_bar.isChecked(),
+            bar_lite=self.w_bar_lite.isChecked(),
             show_floor=False,  # floor plan now handled as panel type
             color_beampipes=self.w_color_beampipes.isChecked(),
             show_xz=self.w_show_xz.isChecked(),
@@ -6430,6 +6552,7 @@ class LuxV4GUI(QMainWindow):
             'color_beampipes': self.w_color_beampipes.isChecked(),
             'show_markers':     self.w_show_markers.isChecked(),
             'show_markers_bar': self.w_show_markers_bar.isChecked(),
+            'bar_lite':         self.w_bar_lite.isChecked(),
             'fs_axis':  self.w_fs_axis.text(),  'fs_tick':  self.w_fs_tick.text(),
             'fs_title': self.w_fs_title.text(), 'fs_annot': self.w_fs_annot.text(),
             'fs_legend':self.w_fs_legend.text(),
@@ -6466,6 +6589,7 @@ class LuxV4GUI(QMainWindow):
         _sc(self.w_color_beampipes, 'color_beampipes')
         _sc(self.w_show_markers,     'show_markers')
         _sc(self.w_show_markers_bar, 'show_markers_bar')
+        _sc(self.w_bar_lite,         'bar_lite')
         _st(self.w_fs_axis,  'fs_axis');  _st(self.w_fs_tick,  'fs_tick')
         _st(self.w_fs_title, 'fs_title'); _st(self.w_fs_annot, 'fs_annot')
         _st(self.w_fs_legend,'fs_legend')
