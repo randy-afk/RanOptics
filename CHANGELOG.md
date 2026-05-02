@@ -6,6 +6,17 @@ Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
 ---
 
+## [1.1.0] — 2026-05
+
+### Added
+- **Beamline Bar Lite** toggle in Panel Options (off by default). When enabled, the beamline bar uses the same two-trace rendering method as the floor plan — one invisible hover line plus one filled polygon per element, laid out linearly along s. This significantly reduces plot generation time for large lattices. Zoom sync with other panels is preserved. Element info is shown in the optics panel hover tooltips instead of the bar itself.
+- **RF cavity ovals** in beamline bar — both standard and lite mode now render RF/L-cavities as ovals scaled to the element length, matching the floor plan appearance.
+
+### Changed
+- Element name now appears in optics panel hover tooltips when Beamline Bar Lite is active.
+
+---
+
 ## [1.0.0] — 2026-04
 
 ### Initial release
