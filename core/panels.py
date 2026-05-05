@@ -11,6 +11,7 @@ from core.utils import (
     make_hover, panel_title, THIN_ELEMENT_THRESHOLD,
 )
 from core.expr import _build_expr_namespace, _eval_expression, _eval_expression_tao
+
 def _read_tunnel_wall(filepath, log_fn=None):
     """Read tunnel wall coordinate file.
 
@@ -22,7 +23,6 @@ def _read_tunnel_wall(filepath, log_fn=None):
         xo, yo, zo  — outer wall arrays
     or None on failure.
     """
-    import re as _re
     def _l(msg):
         if log_fn: log_fn(msg)
     xi,yi,zi,xo,yo,zo = [],[],[],[],[],[]
@@ -34,7 +34,7 @@ def _read_tunnel_wall(filepath, log_fn=None):
                 line = line.strip()
                 if not line or line.startswith('#'): continue
                 # Split on any combination of comma, tab, or whitespace
-                parts = _re.split(r'[,\t\s]+', line)
+                parts = re.split(r'[,\t\s]+', line)
                 parts = [p for p in parts if p]
                 if len(parts) < 6:
                     if short_lines == 0:
@@ -1337,224 +1337,8 @@ def _build_panel3_uni(fig, panel3, s, ba, bb, ex, ey, ox, oy, pa, pb,
         for y, name, color in [(sx,f'{n_lbl}σₓ',c0),(sy,f'{n_lbl}σᵧ',c1)]:
             _utrace(fig, s, y, name, color)
 
-# ─── Single-file loader helper ───────────────────────────────────────────────
 
-def _load_one(input_file, code, log_fn=None, progress_fn=None,
-              xsuite_twiss='4d', xsuite_line=None, universes=None,
-              madx_survey=None):
-    """Load one lattice file and return (data, tao_instance).
-
-    data has the standard keys: s, beta_a, beta_b, eta_x, eta_y,
-    alpha_a, alpha_b, orbit_x, orbit_y, phi_a, phi_b, elements,
-    beam_params, and optionally 'universes' / 'universe_labels'.
-
-    tao_instance is the live Tao object (for expr panels) or None.
-    """
-    code = code.lower()
-    tao_instance = None
-    if code == 'tao':
-        from pytao import Tao
-        tao_instance = Tao(f'-init {input_file} -noplot')
-        data = load_tao(input_file, log_fn, progress_fn=progress_fn,
-                        tao=tao_instance)
-        data['_tao'] = tao_instance
-    elif code == 'elegant':
-        data = load_elegant(input_file, log_fn, progress_fn=progress_fn)
-    elif code == 'xsuite':
-        data = load_xsuite(input_file, log_fn, twiss_method=xsuite_twiss,
-                           line_name=xsuite_line, progress_fn=progress_fn)
-    elif code == 'madx':
-        data = load_madx(input_file, survey_file=madx_survey,
-                         log_fn=log_fn, progress_fn=progress_fn)
-    else:
-        raise ValueError(f"Unknown code '{code}'.")
-
-    # Resolve universe structure
-    all_uni = data.get('universes', {1: data})
-    uni_labels = data.get('universe_labels', {1: 'u1'})
-    if universes:
-        plot_unis = [u for u in universes if u in all_uni]
-    else:
-        plot_unis = list(all_uni.keys())
-
-    return data, tao_instance, all_uni, uni_labels, plot_unis
-
-# ─── Main plot_optics ─────────────────────────────────────────────────────────
-
-# ─── Available data inspector ─────────────────────────────────────────────────
-# Queries the loaded lattice and returns a categorized dict of available
-# attributes and scalars. Used by the "Show available data" button in the GUI.
-
-def _inspect_available_data(input_file, code, log_fn=None,
-                             xsuite_twiss='4d', xsuite_line=None,
-                             madx_survey=None):
-    """Load the lattice and return categorized available attributes.
-
-    Returns
-    -------
-    dict with keys:
-        'standard'  : list of (name, description) always available
-        'extra'     : list of (name, description) extra fetchable attrs
-        'scalars'   : list of (name, value, description) global params
-        'error'     : str or None
-    """
-    def L(m):
-        if log_fn: log_fn(m + '\n')
-
-    result = {'standard': [], 'extra': [], 'scalars': [], 'error': None}
-
-    # Standard arrays — shown with native names for each backend
-    # All names work in expressions (aliases are set up in _build_expr_namespace)
-    _STANDARD = {
-        'tao': [
-            ('s',        'Longitudinal position (m)'),
-            ('beta.a',   'Normal-mode beta function a (m)'),
-            ('beta.b',   'Normal-mode beta function b (m)'),
-            ('alpha.a',  'Normal-mode alpha function a'),
-            ('alpha.b',  'Normal-mode alpha function b'),
-            ('eta.x',    'Horizontal dispersion (m)'),
-            ('eta.y',    'Vertical dispersion (m)'),
-            ('orbit.x',  'Horizontal closed orbit (m)'),
-            ('orbit.y',  'Vertical closed orbit (m)'),
-            ('phase.a',  'Horizontal phase advance (rad)'),
-            ('phase.b',  'Vertical phase advance (rad)'),
-            ('k1',       'Quadrupole strength (m⁻²)'),
-            ('k2',       'Sextupole strength (m⁻³)'),
-            ('angle',    'Bend angle (rad)'),
-            ('length',   'Element length (m)'),
-            ('rho',      'Bend radius (m)'),
-        ],
-        'elegant': [
-            ('s',        'Longitudinal position (m)'),
-            ('betax',    'Horizontal beta function (m)'),
-            ('betay',    'Vertical beta function (m)'),
-            ('alphax',   'Horizontal alpha function'),
-            ('alphay',   'Vertical alpha function'),
-            ('etax',     'Horizontal dispersion (m)'),
-            ('etay',     'Vertical dispersion (m)'),
-            ('etaxp',    'Slope of horizontal dispersion'),
-            ('etayp',    'Slope of vertical dispersion'),
-            ('psix',     'Horizontal phase advance (rad)'),
-            ('psiy',     'Vertical phase advance (rad)'),
-            ('k1',       'Quadrupole strength (m⁻²)'),
-            ('k2',       'Sextupole strength (m⁻³)'),
-            ('angle',    'Bend angle (rad)'),
-            ('length',   'Element length (m)'),
-            ('rho',      'Bend radius (m)'),
-        ],
-        'xsuite': [
-            ('s',        'Longitudinal position (m)'),
-            ('betx',     'Horizontal beta function (m)'),
-            ('bety',     'Vertical beta function (m)'),
-            ('alfx',     'Horizontal alpha function'),
-            ('alfy',     'Vertical alpha function'),
-            ('dx',       'Horizontal dispersion (m)'),
-            ('dy',       'Vertical dispersion (m)'),
-            ('mux',      'Horizontal phase advance (tune units)'),
-            ('muy',      'Vertical phase advance (tune units)'),
-            ('x',        'Horizontal closed orbit (m)'),
-            ('y',        'Vertical closed orbit (m)'),
-            ('k1',       'Quadrupole strength (m⁻²)'),
-            ('k2',       'Sextupole strength (m⁻³)'),
-            ('angle',    'Bend angle (rad)'),
-            ('length',   'Element length (m)'),
-            ('rho',      'Bend radius (m)'),
-        ],
-    }
-    result['standard'] = _STANDARD.get(code, _STANDARD['tao'])
-
-    try:
-        if code == 'tao':
-            # ── Tao: do not spin up a Tao instance here — the TaoDataBrowser
-            # already handles all attribute browsing. Just return the standard
-            # list with common extra attributes; no file loading needed.
-            result['extra'] = [
-                ('k1',           'Quadrupole strength (m⁻²)'),
-                ('k2',           'Sextupole strength (m⁻³)'),
-                ('k3',           'Octupole strength (m⁻⁴)'),
-                ('angle',        'Bend angle (rad)'),
-                ('rho',          'Bend radius (m)'),
-                ('e_tot',        'Total energy (eV)'),
-                ('p0c',          'Reference momentum (eV/c)'),
-                ('ref_tilt',     'Element tilt (rad)'),
-                ('x_offset',     'Horizontal misalignment (m)'),
-                ('y_offset',     'Vertical misalignment (m)'),
-                ('voltage',      'RF voltage (V)'),
-                ('rf_frequency', 'RF frequency (Hz)'),
-                ('emit_a',       'Horizontal emittance (m·rad)'),
-                ('emit_b',       'Vertical emittance (m·rad)'),
-                ('sig_E',        'Energy spread'),
-                ('sigma_x',      'Horizontal beam size (m)'),
-                ('sigma_y',      'Vertical beam size (m)'),
-            ]
-
-        elif code == 'elegant':
-            # ── ELEGANT: static extra attributes (no re-run needed) ────────
-            result['extra'] = [
-                ('etaxp',      "Slope of horizontal dispersion"),
-                ('etayp',      "Slope of vertical dispersion"),
-                ('xAperture',  "Effective horizontal aperture (m)"),
-                ('yAperture',  "Effective vertical aperture (m)"),
-                ('dI1',        "Per-element radiation integral I1 (m)"),
-                ('dI2',        "Per-element radiation integral I2 (1/m)"),
-                ('dI3',        "Per-element radiation integral I3 (1/m²)"),
-                ('dI4',        "Per-element radiation integral I4 (1/m)"),
-                ('dI5',        "Per-element radiation integral I5 (1/m²)"),
-            ]
-
-        elif code == 'xsuite':
-            # ── xsuite: load and inspect twiss table columns ──────────────
-            data = load_xsuite(input_file, log_fn=log_fn,
-                               twiss_method=xsuite_twiss,
-                               line_name=xsuite_line)
-            tw_cols = [k for k in data.keys()
-                       if k not in ('s', 'elements', 'beam_params', '_tao', '_tw')
-                       and isinstance(data.get(k), np.ndarray)]
-            result['extra'] = [(c, "xsuite twiss column") for c in sorted(tw_cols)]
-
-        elif code == 'madx':
-            # ── MAD-X: read actual columns from the TFS files ─────────────
-            if not input_file or not Path(input_file).exists():
-                result['error'] = f"Twiss file not found: {input_file}"
-            else:
-                try:
-                    scalars, twi_cols, _ = _read_tfs(input_file)
-                    # Exclude bookkeeping columns that aren't plottable quantities
-                    _skip = {'NAME', 'KEYWORD', 'PARENT', 'TYPE', 'ORIGIN', 'COMMENTS'}
-                    result['extra'] = [
-                        (c.lower(), f"twiss column  ({c})")
-                        for c in twi_cols if c.upper() not in _skip
-                    ]
-                    # Scalars from twiss header
-                    result['scalars'] = [
-                        (k.lower(), v, "twiss header scalar")
-                        for k, v in scalars.items()
-                    ]
-                except Exception as _te:
-                    result['error'] = f"Could not read twiss TFS: {_te}"
-
-            # Survey file columns (separate section shown in browser)
-            if madx_survey and Path(madx_survey).exists():
-                try:
-                    _, sv_cols, _ = _read_tfs(madx_survey)
-                    _skip_sv = {'NAME', 'KEYWORD', 'PARENT', 'TYPE'}
-                    result['survey_cols'] = [
-                        (c.lower(), f"survey column  ({c})")
-                        for c in sv_cols if c.upper() not in _skip_sv
-                    ]
-                except Exception as _se:
-                    result['survey_cols'] = []
-                    L(f"[inspector] Survey read failed: {_se}")
-            else:
-                result['survey_cols'] = []
-
-    except Exception as e:
-        import traceback
-        result['error'] = traceback.format_exc()
-        L(f"[inspector] Error: {e}")
-
-    return result
-
+# ─── Annotation helpers ─────────────────────────────────────────────────────
 
 def _build_panel_annotations(fig, elements, pattern, row,
                               annot_font_size=8):
@@ -1683,13 +1467,3 @@ def _build_tune_annotation(fig, beam_params, row=1):
         borderwidth=1, borderpad=6,
         font=dict(size=12, color="#f2f2f7", family="monospace"),
     )
-
-def _parse_fp_range(rng_str):
-    """Parse a range string like '-0.5:0.5' into [float, float] or None."""
-    if not rng_str: return None
-    try:
-        parts = str(rng_str).split(':')
-        if len(parts) != 2: return None
-        return [float(parts[0].strip()), float(parts[1].strip())]
-    except (ValueError, AttributeError):
-        return None

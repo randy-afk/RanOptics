@@ -3,8 +3,7 @@
 # =============================================================================
 
 from __future__ import annotations
-import json, math, re, threading, time, traceback
-import os, json, fnmatch, traceback
+import fnmatch, json, math, os, re, threading, time, traceback
 from pathlib import Path
 import numpy as np
 
@@ -20,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from core.themes import (
     ACCENT, ACCENT2, BG, BORDER, CRUST, ERROR, FG, FG_DIM, FG_LBL,
-    MANTLE, PANEL, PEACH, RAN_CLR, SUCCESS, SURFACE2, TEAL, WARN,
+    MANTLE, PANEL, PEACH, RAN_CLR, SUCCESS, SURFACE2, HIGHLIGHT, WARN,
     FONT_BOLD, FONT_HDR, FONT_MAIN, FONT_MONO, FONT_SEC, FONT_SMALL,
     _BTN_SS, _CHK_SS, _COMBO_SS, _ENTRY_SS, _RB_SS, _SCROLL_SS, _TAB_SS,
 )
@@ -30,17 +29,12 @@ from core.utils import (
     _parse_yrange, _parse_fp_range,
 )
 from core.engine import plot_optics
+from core.loaders import load_tao, load_elegant, load_xsuite, _parse_tao_init
 from core.overlays import (
     CustomPanelOverlay, ExprPanelOverlay,
     _TAO_DATA_CATEGORIES, _ELEGANT_TWI_COLUMNS, _ELEGANT_CEN_COLUMNS,
     _ELEGANT_SIG_COLUMNS, _ELEGANT_TWI_SCALARS,
 )
-def _clf(line):
-    lo = line.lower()
-    if any(w in lo for w in ("error", "traceback", "exception", "failed", "✗")): return "error"
-    if any(w in lo for w in ("warning", "warn")): return "warn"
-    if any(w in lo for w in ("saved", "done", "complete", "✓")): return "ok"
-    return "info"
 
 # ── Worker thread ─────────────────────────────────────────────────────────────
 
@@ -208,7 +202,7 @@ class _FodoLogo(QWidget):
         # betax curve
         pts_x = [QPointF(lx(32 + i / 80 * 104), ly(67 - 20 * math.cos(math.pi * 2 * i / 80)))
                  for i in range(81)]
-        pen = QPen(QColor(ACCENT), 2); pen.setCapStyle(Qt.RoundCap)
+        pen = QPen(QColor(RAN_CLR), 2); pen.setCapStyle(Qt.RoundCap)
         p.setPen(pen)
         for i in range(len(pts_x) - 1): p.drawLine(pts_x[i], pts_x[i + 1])
         # betay curve
@@ -221,8 +215,8 @@ class _FodoLogo(QWidget):
         ey = ly(106); eh = max(3, int(9 * sy))
         from PySide6.QtCore import QRectF
         for ex_, ew, col, lbl_text in [
-            (30, 18, ACCENT, 'F'), (48, 30, None, None),
-            (78, 18, ERROR, 'D'), (96, 30, None, None), (126, 18, ACCENT, 'F')
+            (30, 18, RAN_CLR, 'F'), (48, 30, None, None),
+            (78, 18, ERROR, 'D'), (96, 30, None, None), (126, 18, RAN_CLR, 'F')
         ]:
             x1 = lx(ex_); x2 = lx(ex_ + ew)
             if col is None:
@@ -368,7 +362,7 @@ class LuxV4GUI(QMainWindow):
         opt = QLabel("Optics"); opt.setFont(FONT_HDR); opt.setStyleSheet(f"color: {ERROR}; background: transparent; letter-spacing: 2px;")
         nr.addWidget(ran); nr.addWidget(opt); nr.addStretch()
         tv.addWidget(name_row)
-        sub = QLabel("Accelerator Optics Plotter  •  v1.1.0"); sub.setFont(FONT_SMALL)
+        sub = QLabel("Accelerator Optics Plotter  •  v1.2.1"); sub.setFont(FONT_SMALL)
         sub.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
         tv.addWidget(sub)
         row.addWidget(txt)
@@ -376,8 +370,8 @@ class LuxV4GUI(QMainWindow):
 
         rf = QWidget(); rf.setStyleSheet("background: transparent;")
         rv = QVBoxLayout(rf); rv.setContentsMargins(0,0,0,0); rv.setSpacing(2)
-        for t in ("For questions do NOT contact Randika", "Send bug reports to randika@jlab.org"):
-            l = QLabel(t); l.setFont(FONT_SMALL); l.setAlignment(Qt.AlignRight)
+        for t in ("Author: Randika Gamage  (randika@jlab.org)", "Support: ¯\\_(ツ)_/¯  (good luck, I believe in you)"):
+            l = QLabel(t); l.setFont(FONT_SMALL); l.setAlignment(Qt.AlignLeft)
             l.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
             rv.addWidget(l)
         row.addWidget(rf)
@@ -402,7 +396,7 @@ class LuxV4GUI(QMainWindow):
             }}
             QProgressBar::chunk {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {ACCENT}, stop:1 {TEAL});
+                    stop:0 {ACCENT}, stop:1 {HIGHLIGHT});
                 border-radius: 3px;
             }}
         """)
@@ -429,7 +423,7 @@ class LuxV4GUI(QMainWindow):
                 background: {ACCENT}; border-radius: 8px;
                 color: {CRUST}; font-weight: bold; border: none;
             }}
-            QPushButton:hover {{ background: {TEAL}; color: {CRUST}; }}
+            QPushButton:hover {{ background: {HIGHLIGHT}; color: {CRUST}; }}
             QPushButton:disabled {{ background: {BORDER}; color: {FG_DIM}; border: none; }}
         """)
         row.addWidget(self.run_btn)
@@ -474,11 +468,57 @@ class LuxV4GUI(QMainWindow):
     # ── Log ───────────────────────────────────────────────────────────────────
 
     def _build_log(self):
+        self._log_autoscroll  = True
+        self._log_filter      = 'all'   # 'all' | 'warn' | 'error'
+        self._log_last_line   = ''      # for deduplication
+        self._log_repeat_count = 0
+        self._log_full        = []      # list of (text, tag) — full unfiltered history
+
         lf = QWidget(); lf.setStyleSheet(f"background: {BG};")
         lv = QVBoxLayout(lf); lv.setContentsMargins(12, 4, 12, 4); lv.setSpacing(2)
+
+        # ── Log toolbar ───────────────────────────────────────────────────────
+        tb = QWidget(); tb.setStyleSheet("background: transparent;")
+        tbh = QHBoxLayout(tb); tbh.setContentsMargins(0, 0, 0, 2); tbh.setSpacing(6)
+
         hdr = QLabel("OUTPUT LOG"); hdr.setFont(FONT_SEC)
         hdr.setStyleSheet(f"color: {ACCENT2}; background: transparent;")
-        lv.addWidget(hdr)
+        tbh.addWidget(hdr)
+        tbh.addStretch()
+
+        # Filter dropdown
+        self._log_filter_dd = QComboBox(); self._log_filter_dd.setFont(FONT_SMALL)
+        self._log_filter_dd.addItems(["All", "Warnings+", "Errors only"])
+        self._log_filter_dd.setFixedWidth(110); self._log_filter_dd.setStyleSheet(_COMBO_SS)
+        self._log_filter_dd.currentIndexChanged.connect(self._on_log_filter_changed)
+        tbh.addWidget(self._log_filter_dd)
+
+        # Auto-scroll toggle
+        self._log_scroll_btn = QPushButton("⇩ Auto"); self._log_scroll_btn.setFont(FONT_SMALL)
+        self._log_scroll_btn.setFixedWidth(70); self._log_scroll_btn.setCheckable(True)
+        self._log_scroll_btn.setChecked(True)
+        self._log_scroll_btn.clicked.connect(self._on_log_scroll_toggle)
+        self._log_scroll_btn.setStyleSheet(f"""
+            QPushButton {{ background: {PANEL}; border: 1px solid {BORDER};
+                border-radius: 6px; color: {FG_DIM}; padding: 2px 6px; }}
+            QPushButton:checked {{ color: {ACCENT}; border-color: {ACCENT}; }}
+            QPushButton:hover {{ background: {SURFACE2}; }}
+        """)
+        tbh.addWidget(self._log_scroll_btn)
+
+        # Copy button
+        copy_btn = QPushButton("⎘ Copy"); copy_btn.setFont(FONT_SMALL)
+        copy_btn.setFixedWidth(70)
+        copy_btn.clicked.connect(self._copy_log)
+        copy_btn.setStyleSheet(f"""
+            QPushButton {{ background: {PANEL}; border: 1px solid {BORDER};
+                border-radius: 6px; color: {FG_DIM}; padding: 2px 6px; }}
+            QPushButton:hover {{ background: {SURFACE2}; color: {FG}; }}
+        """)
+        tbh.addWidget(copy_btn)
+
+        lv.addWidget(tb)
+
         self.log = QTextEdit(); self.log.setReadOnly(True)
         self.log.setFont(FONT_MONO); self.log.setFixedHeight(140)
         self.log.setStyleSheet(f"""
@@ -491,6 +531,29 @@ class LuxV4GUI(QMainWindow):
         lv.addWidget(self.log)
         self._root_layout.addWidget(lf)
         self._log("Ready. Configure options above and click ▶ Run.\n", "dim")
+
+    def _on_log_filter_changed(self, idx):
+        self._log_filter = ['all', 'warn', 'error'][idx]
+        self._redraw_log()
+
+    def _on_log_scroll_toggle(self, checked):
+        self._log_autoscroll = checked
+        if checked:
+            self.log.ensureCursorVisible()
+
+    def _copy_log(self):
+        text = self.log.toPlainText()
+        QApplication.clipboard().setText(text)
+
+    def _redraw_log(self):
+        """Redraw log from history applying current filter."""
+        self.log.clear()
+        for text, tag in self._log_full:
+            if self._log_filter == 'error' and tag not in ('error',):
+                continue
+            if self._log_filter == 'warn' and tag not in ('error', 'warn'):
+                continue
+            self._write_log(text, tag)
 
     # ── Form (tabs) ───────────────────────────────────────────────────────────
 
@@ -869,6 +932,12 @@ class LuxV4GUI(QMainWindow):
         self._panel_rows = []
         if not hasattr(self, '_panel_height_edits'):
             self._panel_height_edits = {}
+        # Ensure every dict-spec panel has a unique _id regardless of how it was added
+        import uuid as _uuid
+        for _p in self._panels:
+            _s = _p.get('spec', '')
+            if isinstance(_s, dict) and '_id' not in _s:
+                _s['_id'] = _uuid.uuid4().hex[:8]
         self._panel_leg_checks  = {}
         self._panel_leg_x_edits = {}
         self._panel_leg_y_edits = {}
@@ -890,16 +959,21 @@ class LuxV4GUI(QMainWindow):
             name_btn.clicked.connect(lambda _=False, p=pos: self._rename_panel(p))
             rh.addWidget(name_btn)
 
-            # Height field — keyed by spec string for reliable lookup
+            # Height field — keyed by _id for custom/expr panels, spec string for presets
             spec = panel.get('spec', '')
-            spec_key = spec if isinstance(spec, str) else spec.get('type', 'custom')
+            if isinstance(spec, str):
+                h_key    = spec
+                spec_key = spec
+            else:
+                h_key    = spec.get('_id', spec.get('type', 'custom'))
+                spec_key = spec.get('type', 'custom')
             default_h = str(_DEFAULT_H.get(spec_key, 280))
-            prev_val = self._panel_height_edits.get(spec_key, default_h)
+            prev_val = self._panel_height_edits.get(h_key, default_h)
             h_edit = QLineEdit(prev_val); h_edit.setFixedWidth(55); h_edit.setFixedHeight(28)
             h_edit.setFont(FONT_MAIN); h_edit.setStyleSheet(_ENTRY_SS)
             h_edit.setToolTip("Panel height in pixels")
-            self._panel_height_edits[spec_key] = prev_val
-            h_edit.textChanged.connect(lambda v, s=spec_key: self._panel_height_edits.update({s: v}))
+            self._panel_height_edits[h_key] = prev_val
+            h_edit.textChanged.connect(lambda v, k=h_key: self._panel_height_edits.update({k: v}))
             rh.addWidget(h_edit)
 
             for sym, cmd, col in [
@@ -964,8 +1038,8 @@ class LuxV4GUI(QMainWindow):
                 leg_btn.setToolTip('Set legend position (x:y, normalized 0-1)')
                 leg_btn.setStyleSheet(f"""
                     QPushButton {{ background: {BORDER}; border-radius: 4px; color: {FG}; border: none; }}
-                    QPushButton:checked {{ background: {TEAL}; color: {CRUST}; }}
-                    QPushButton:hover {{ background: {TEAL}; color: {CRUST}; }}
+                    QPushButton:checked {{ background: {HIGHLIGHT}; color: {CRUST}; }}
+                    QPushButton:hover {{ background: {HIGHLIGHT}; color: {CRUST}; }}
                 """)
                 rh.addWidget(leg_btn)
 
@@ -1101,6 +1175,9 @@ class LuxV4GUI(QMainWindow):
             overlay_w.hide(); overlay_w.setParent(None); overlay_w.deleteLater()
             old_sa.show()
             if result:
+                import uuid as _uuid
+                if isinstance(result, dict) and '_id' not in result:
+                    result['_id'] = _uuid.uuid4().hex[:8]
                 self._panels.append({'name': result['name'], 'spec': result})
                 self._render_panel_list()
 
@@ -1111,7 +1188,8 @@ class LuxV4GUI(QMainWindow):
     def _add_compare_file(self):
         f, _ = QFileDialog.getOpenFileName(
             self, "Select compare file", "",
-            "All supported (*.init *.ele *.json);;All files (*.*)")
+            "All supported (*.init *.ele *.json);;All files (*.*)",
+            options=QFileDialog.DontUseNativeDialog)
         if not f: return
         ext = Path(f).suffix.lower()
         code = {'.init': 'tao', '.ele': 'elegant', '.json': 'xsuite'}.get(ext, 'tao')
@@ -1334,25 +1412,29 @@ class LuxV4GUI(QMainWindow):
     def _browse_input(self):
         f, _ = QFileDialog.getOpenFileName(
             self, "Select input file", "",
-            "All supported (*.init *.ele *.json *.tfs);;Tao init (*.init);;ELEGANT ele (*.ele);;xsuite JSON (*.json);;MAD-X TFS (*.tfs);;All files (*.*)")
+            "All supported (*.init *.ele *.json *.tfs);;Tao init (*.init);;ELEGANT ele (*.ele);;xsuite JSON (*.json);;MAD-X TFS (*.tfs);;All files (*.*)",
+            options=QFileDialog.DontUseNativeDialog)
         if f: self.w_input.setText(f)
 
     def _browse_madx_survey(self):
         f, _ = QFileDialog.getOpenFileName(
             self, "Select MAD-X survey file", "",
-            "TFS files (*.tfs);;All files (*.*)")
+            "TFS files (*.tfs);;All files (*.*)",
+            options=QFileDialog.DontUseNativeDialog)
         if f: self.w_madx_survey.setText(f)
 
     def _browse_tunnel(self):
         f, _ = QFileDialog.getOpenFileName(
             self, "Select tunnel wall file", "",
-            "Data files (*.dat *.txt *.csv);;All files (*.*)")
+            "Data files (*.dat *.txt *.csv);;All files (*.*)",
+            options=QFileDialog.DontUseNativeDialog)
         if f: self.w_tunnel_file.setText(f)
 
     def _browse_output(self):
         f, _ = QFileDialog.getSaveFileName(
             self, "Save output HTML", "optics.html",
-            "HTML files (*.html);;All files (*.*)")
+            "HTML files (*.html);;All files (*.*)",
+            options=QFileDialog.DontUseNativeDialog)
         if f: self.w_output.setText(f)
 
     # ── Collect kwargs ────────────────────────────────────────────────────────
@@ -1552,7 +1634,8 @@ class LuxV4GUI(QMainWindow):
 
     _LOG_COLORS = {"ok": SUCCESS, "warn": WARN, "error": ERROR, "dim": FG_DIM, "info": FG}
 
-    def _log(self, text, tag="info"):
+    def _write_log(self, text, tag):
+        """Write text directly to the log widget with color."""
         color = self._LOG_COLORS.get(tag, FG)
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(color))
@@ -1562,7 +1645,46 @@ class LuxV4GUI(QMainWindow):
         cursor.setCharFormat(fmt)
         cursor.insertText(text)
         self.log.setTextCursor(cursor)
-        self.log.ensureCursorVisible()
+        if self._log_autoscroll:
+            self.log.ensureCursorVisible()
+
+    def _log(self, text, tag="info"):
+        import time as _time
+        # ── Deduplication ─────────────────────────────────────────────────────
+        stripped = text.strip()
+        if stripped and stripped == self._log_last_line.strip():
+            self._log_repeat_count += 1
+            # Update the last line in widget to show repeat count
+            cursor = self.log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            cursor.movePosition(cursor.MoveOperation.StartOfLine, cursor.MoveMode.KeepAnchor)
+            color = self._LOG_COLORS.get(tag, FG)
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(FG_DIM))
+            fmt.setFont(FONT_MONO)
+            cursor.setCharFormat(fmt)
+            cursor.insertText(f"  ↑ repeated {self._log_repeat_count + 1}×\n")
+            self.log.setTextCursor(cursor)
+            if self._log_autoscroll: self.log.ensureCursorVisible()
+            return
+        else:
+            self._log_repeat_count = 0
+            self._log_last_line = stripped
+
+        # ── Timestamp ─────────────────────────────────────────────────────────
+        ts = _time.strftime("%H:%M:%S")
+        display = f"[{ts}] {text}" if text.strip() else text
+
+        # ── Store in full history ──────────────────────────────────────────────
+        self._log_full.append((display, tag))
+
+        # ── Apply filter ──────────────────────────────────────────────────────
+        if self._log_filter == 'error' and tag not in ('error',):
+            return
+        if self._log_filter == 'warn' and tag not in ('error', 'warn'):
+            return
+
+        self._write_log(display, tag)
 
     def _log_safe(self, text, tag="info"):
         """Thread-safe: emit signal, Qt delivers it to main thread."""
@@ -1570,6 +1692,9 @@ class LuxV4GUI(QMainWindow):
 
     def _clear_log(self):
         self.log.clear()
+        self._log_full = []
+        self._log_last_line = ''
+        self._log_repeat_count = 0
         self._log("Log cleared.\n", "dim")
 
     # ── Recent files ──────────────────────────────────────────────────────────
@@ -1739,4 +1864,3 @@ class LuxV4GUI(QMainWindow):
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Overlay compositors — CustomPanelOverlay, ExprPanelOverlay
 # ═══════════════════════════════════════════════════════════════════════════════
-

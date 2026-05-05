@@ -16,18 +16,18 @@ FG       = "#EEF5F2"   # Primary text
 FG_DIM   = "#A8C4BC"   # Dimmed / hint text
 FG_LBL   = "#8AB0A6"   # Label text
 ACCENT   = "#FDA769"   # Peach — UI highlights, active states
+ACCENT2  = ACCENT      # Alias for ACCENT
+PEACH    = ACCENT      # Alias for ACCENT
 RAN_CLR  = "#00e676"   # Bright green — RanOptics "Ran" logo
 ERROR    = "#d62828"   # Bright red — DO NOT CHANGE
-ACCENT2  = "#FDA769"   # Peach / orange accent
 WARN     = "#FEC868"   # Warm yellow
-SUCCESS  = "#00e676"   # Bright green — success state
-TEAL     = "#FEC868"   # Info (warm yellow)
-PEACH    = "#FDA769"   # Peach (alias for ACCENT2)
+HIGHLIGHT = WARN       # Secondary hover/gradient highlight — alias for WARN
+SUCCESS  = RAN_CLR     # Bright green — success state — alias for RAN_CLR
 
 # ── Fonts ─────────────────────────────────────────────────────────────────────
 FONT_MAIN  = QFont(); FONT_MAIN.setPointSize(11)
 FONT_BOLD  = QFont(); FONT_BOLD.setPointSize(11);  FONT_BOLD.setBold(True)
-FONT_SMALL = QFont(); FONT_SMALL.setPointSize(11)
+FONT_SMALL = QFont(); FONT_SMALL.setPointSize(9)
 FONT_MONO  = QFont("Monospace"); FONT_MONO.setPointSize(10)
 FONT_HDR   = QFont("Monospace"); FONT_HDR.setPointSize(16); FONT_HDR.setBold(True)
 FONT_SEC   = QFont(); FONT_SEC.setPointSize(11);   FONT_SEC.setBold(True)
@@ -66,11 +66,10 @@ _COMBO_SS = f"""
 _BTN_SS = f"""
     QPushButton {{
         background: {PANEL}; border: 1px solid {BORDER};
-        border-radius: 8px; color: {ACCENT}; padding: 4px 10px;
-        font-weight: 500;
+        border-radius: 8px; color: {ACCENT}; padding: 4px 8px;
     }}
     QPushButton:hover  {{
-        background: {SURFACE2}; border-color: {ACCENT}; color: {ACCENT};
+        background: {SURFACE2}; border-color: {ACCENT};
     }}
     QPushButton:pressed {{ background: {BORDER}; }}
     QPushButton:disabled {{ color: {FG_DIM}; border-color: {BORDER}; background: {PANEL}; }}

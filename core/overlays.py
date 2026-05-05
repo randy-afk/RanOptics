@@ -7,7 +7,6 @@ import os, re, subprocess, sys, threading
 from pathlib import Path
 import numpy as np
 
-from PySide6.QtCore    import Qt, Signal
 from PySide6.QtCore    import Qt, Signal, QObject
 from PySide6.QtGui     import QColor, QPalette
 from PySide6.QtWidgets import (
@@ -18,11 +17,13 @@ from PySide6.QtWidgets import (
 
 from core.themes import (
     ACCENT, ACCENT2, BG, BORDER, CRUST, ERROR, FG, FG_DIM, FG_LBL,
-    MANTLE, PANEL, SUCCESS, SURFACE2, TEAL, WARN,
+    MANTLE, PANEL, SUCCESS, SURFACE2, HIGHLIGHT, WARN,
     FONT_BOLD, FONT_MAIN, FONT_MONO, FONT_SEC, FONT_SMALL,
     _BTN_SS, _CHK_SS, _COMBO_SS, _ENTRY_SS, _RB_SS, _SCROLL_SS,
 )
 from core.utils import _make_scroll_widget, _help, _sec
+from core.engine import _inspect_available_data
+from core.loaders import _read_tfs, load_xsuite
 
 # ── Data browser constants ────────────────────────────────────────────────────
 _TAO_DATA_CATEGORIES = {

@@ -10,7 +10,7 @@ import numpy as np
 from core.utils import _parse_fp_range, panel_title
 from core.loaders import (
     load_tao, load_elegant, load_madx, load_xsuite,
-    _parse_tao_init, _load_tao_universe,
+    _parse_tao_init, _load_tao_universe, _read_tfs,
 )
 from core.panels import (
     _build_floor_plan, _build_floor_plan_yz,
@@ -239,134 +239,6 @@ def _inspect_available_data(input_file, code, log_fn=None,
 
     return result
 
-
-def _build_panel_annotations(fig, elements, pattern, row,
-                              annot_font_size=8):
-    """Add rotated element-name annotations to a data panel.
-
-    Places each label at the maximum y value of all plotted traces at
-    that s position, so annotations follow the data rather than sitting
-    at a fixed position.
-
-    Parameters
-    ----------
-    fig             : plotly Figure
-    elements        : list of element dicts
-    pattern         : fnmatch wildcard string, comma-separated
-    row             : subplot row number
-    annot_font_size : font size for annotation labels
-    """
-    import fnmatch
-    import numpy as np
-    if not pattern or not pattern.strip():
-        return
-
-    patterns = [p.strip() for p in pattern.split(',') if p.strip()]
-    if not patterns:
-        return
-
-    # Collect all x/y data from traces on this row
-    # Build a combined array: for each s_pos, find max y across all traces
-    row_traces = [t for t in fig.data
-                  if hasattr(t, 'xaxis') and
-                  t.xaxis == fig.get_subplot(row, 1).xaxis.plotly_name.replace('xaxis', 'x').replace('x', 'xaxis').replace('xaxisaxis','xaxis')]
-
-    # Simpler: collect all (x_arr, y_arr) pairs from traces in this subplot
-    # Match by checking xaxis attribute against expected axis for this row
-    expected_xaxis = fig.get_subplot(row, 1).xaxis.plotly_name  # e.g. 'xaxis3'
-    expected_x_ref = expected_xaxis.replace('xaxis', 'x')       # e.g. 'x3'
-    # xaxis attr on traces is stored as 'x', 'x2', 'x3' etc.
-    trace_pairs = []
-    for t in fig.data:
-        t_xaxis = getattr(t, 'xaxis', 'x') or 'x'
-        if t_xaxis == expected_x_ref:
-            x_data = getattr(t, 'x', None)
-            y_data = getattr(t, 'y', None)
-            if x_data is not None and y_data is not None and len(x_data) == len(y_data):
-                try:
-                    trace_pairs.append((np.array(x_data, dtype=float),
-                                        np.array(y_data, dtype=float)))
-                except (TypeError, ValueError):
-                    pass
-
-    def _max_y_at_s(s_pos):
-        """Find max y value across all traces at the nearest s position."""
-        if not trace_pairs:
-            return None
-        best = None
-        for xs, ys in trace_pairs:
-            if len(xs) == 0: continue
-            idx = int(np.argmin(np.abs(xs - s_pos)))
-            val = float(ys[idx])
-            if np.isfinite(val):
-                best = val if best is None else max(best, val)
-        return best
-
-    xax = fig.get_subplot(row, 1).xaxis.plotly_name.replace('xaxis', 'x')
-    yax = fig.get_subplot(row, 1).yaxis.plotly_name.replace('yaxis', 'y')
-
-    annotated = set()
-    for elem in elements:
-        name = elem['name'].split('\\')[-1]
-        matched = any(fnmatch.fnmatch(name.upper(), p.upper()) for p in patterns)
-        if not matched:
-            continue
-        s_pos = elem['s_start'] + elem['length'] / 2.0
-        key = round(s_pos, 6)
-        if key in annotated:
-            continue
-        annotated.add(key)
-
-        y_val = _max_y_at_s(s_pos)
-        if y_val is not None:
-            # Place label at the data value, in data coordinates
-            fig.add_annotation(
-                x=s_pos, y=y_val,
-                xref=xax, yref=yax,
-                text=name,
-                showarrow=False,
-                textangle=-90,
-                xanchor='center', yanchor='bottom',
-                font=dict(size=annot_font_size, color='#a0a0c0'),
-            )
-        else:
-            # Fallback to top of panel if no trace data found
-            fig.add_annotation(
-                x=s_pos, y=1.0,
-                xref=xax, yref=f'{yax} domain',
-                text=name,
-                showarrow=False,
-                textangle=-90,
-                xanchor='center', yanchor='top',
-                font=dict(size=annot_font_size, color='#a0a0c0'),
-            )
-
-
-def _build_tune_annotation(fig, beam_params, row=1):
-    """Add a tune/chromaticity info box as an annotation on the given row."""
-    import plotly.graph_objects as go
-    bp = beam_params or {}
-    qa = bp.get('tune_a'); qb = bp.get('tune_b')
-    ca = bp.get('chroma_a'); cb = bp.get('chroma_b')
-    if qa is None and qb is None: return
-    lines = []
-    if qa is not None: lines.append(f"Qₓ = {qa:.4f}")
-    if qb is not None: lines.append(f"Qᵧ = {qb:.4f}")
-    if ca is not None: lines.append(f"Qₓ’ = {ca:.2f}")
-    if cb is not None: lines.append(f"Qᵧ’ = {cb:.2f}")
-    if not lines: return
-    text = "<br>".join(lines)
-    # plotly_name is e.g. 'xaxis', 'xaxis2' — strip 'axis' to get 'x', 'x2'
-    xref = fig.get_subplot(row, 1).xaxis.plotly_name.replace('xaxis', 'x')
-    yref = fig.get_subplot(row, 1).yaxis.plotly_name.replace('yaxis', 'y')
-    fig.add_annotation(
-        text=text, xref=f"{xref} domain", yref=f"{yref} domain",
-        x=0.01, y=0.98, xanchor="left", yanchor="top",
-        showarrow=False, align="left",
-        bgcolor="rgba(30,30,46,0.8)", bordercolor="#4a4a6a",
-        borderwidth=1, borderpad=6,
-        font=dict(size=12, color="#f2f2f7", family="monospace"),
-    )
 
 def plot_optics(
     input_file, code='tao', output_file='optics.html',
@@ -862,10 +734,12 @@ def plot_optics(
         _DATA_H = 280  # default for data panels
 
         def _panel_px(p, idx):
-            _raw_spec = p if isinstance(p, str) else p.get('spec', '')
-            spec = _raw_spec if isinstance(_raw_spec, str) else _raw_spec.get('type', 'custom')
-            if panel_heights and spec in panel_heights:
-                return int(panel_heights[spec])
+            if isinstance(p, str):
+                key = p
+            else:
+                key = p.get('_id', p.get('type', 'custom'))
+            if panel_heights and key in panel_heights:
+                return int(panel_heights[key])
             if isinstance(p, str):
                 return _DEFAULT_H.get(p, _DATA_H)
             return _DATA_H
@@ -1109,6 +983,9 @@ def plot_optics(
                 if not _tune_annotated and not _multi and show_tune:
                     _build_tune_annotation(fig, beam_params, row=current_row)
                     _tune_annotated = True
+                _eref = f'x{first_s_row}' if first_s_row > 1 else 'x'
+                if current_row != first_s_row:
+                    fig.update_xaxes(matches=_eref, row=current_row, col=1)
                 current_row += 1
                 continue
             if _multi:
@@ -1312,6 +1189,10 @@ def plot_optics(
             ax = f'xaxis{r}' if r > 1 else 'xaxis'
             lkw[ax] = dict(domain=x_domain)
         fig.update_layout(**lkw)
+        # Set domain on any additional xaxes created by secondary_y=True
+        for ax in fig.layout:
+            if ax.startswith('xaxis') and ax not in lkw:
+                fig.layout[ax].domain = x_domain
 
         # ── Separate mode: one mini-figure per panel slot, interleaved ──────────
         # Order: [floor group] [panel0 group] [panel1 group] ... [bar group]
@@ -1619,6 +1500,34 @@ def plot_optics(
         for _, cfig in fig._compare_figs:
             _apply(cfig)
 
+
+    # Fix alignment: disable automargin on all yaxes, and copy domain from
+    # primary to secondary yaxes where domain is None (secondary y-axes from make_subplots)
+    _yax_domains = {}
+    for ax in sorted(fig.layout):
+        if ax.startswith('yaxis'):
+            ya = fig.layout[ax]
+            ya.automargin = False
+            d = getattr(ya, 'domain', None)
+            if d and d[0] is not None:
+                _yax_domains[ax] = d
+    # Copy domain to any yaxis with domain=None using overlaying reference
+    for ax in sorted(fig.layout):
+        if ax.startswith('yaxis'):
+            ya = fig.layout[ax]
+            d = getattr(ya, 'domain', None)
+            if not d or d[0] is None:
+                overlay = getattr(ya, 'overlaying', None)
+                if overlay:
+                    ref_ax = 'yaxis' if overlay == 'y' else f'yaxis{overlay[1:]}'
+                    if ref_ax in _yax_domains:
+                        ya.domain = _yax_domains[ref_ax]
+    # Force all xaxes to the same physical domain so floor plan and data panels
+    # have identical plot area width
+    for ax in sorted(fig.layout):
+        if ax.startswith('xaxis'):
+            fig.layout[ax].domain = x_domain
+    fig.update_layout(margin=dict(l=100))
     _prog(93, 'Writing HTML...')
     if hasattr(fig, '_compare_figs') and fig._compare_figs:
         import plotly.io as pio
