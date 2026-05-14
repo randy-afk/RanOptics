@@ -1,0 +1,62 @@
+site_name: RanOptics
+site_description: Accelerator Optics Plotter — Interactive visualization for Tao, ELEGANT, xsuite, and MAD-X
+site_author: Randika Gamage
+site_url: https://randy-afk.github.io/RanOptics/
+repo_url: https://github.com/randy-afk/RanOptics
+repo_name: randy-afk/RanOptics
+
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: custom
+    accent: deep orange
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+  logo: assets/logo_docs.png
+  favicon: assets/logo_docs.png
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: installation.md
+    - Quickstart: quickstart.md
+  - User Guide:
+    - Interface Overview: interface.md
+    - Panels: panels.md
+    - Expression Panels: expressions.md
+    - Backends: backends.md
+    - Compare Mode: compare.md
+    - Floor Plans: floorplans.md
+    - Export: export.md
+  - Reference:
+    - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+  - md_in_html
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/randy-afk/RanOptics
