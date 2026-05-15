@@ -40,6 +40,7 @@ nav:
     - Compare Mode: compare.md
     - Floor Plans: floorplans.md
     - Export: export.md
+  - Examples: examples.md
   - Reference:
     - Changelog: changelog.md
 
