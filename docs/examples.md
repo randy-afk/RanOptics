@@ -34,3 +34,13 @@ Floor plan only, showing all three spatial projections: X-Z (top-down view of th
 ![CEBAF Floor Plan](assets/CEBAF_floorplan.png)
 
 [Open interactive plot](assets/CEBAF_floorplan.html){ .md-button }
+
+---
+
+## LTR — Multi-Universe Overlay
+
+This example demonstrates RanOptics' multi-universe capability using a Tao/Bmad lattice. Two universes are overlaid on the same dashboard: the LTR merging into the RCS (universe 1) and the RCS alone (universe 2). The floor plan shows both X-Z and Y-Z projections of the beamline geometry. Beta functions and dispersion panels show both universes simultaneously, with each trace labeled by universe in the legend.
+
+![LTR Multi-Universe](assets/LTR.png)
+
+[Open interactive plot](assets/LTR.html){ .md-button }
