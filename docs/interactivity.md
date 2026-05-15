@@ -6,7 +6,7 @@ RanOptics outputs a self-contained HTML file powered by [Plotly](https://plotly.
 
 ## The Toolbar
 
-When you hover over any panel, the Plotly toolbar appears in the top-right corner of that panel.
+The Plotly toolbar is located in the top-right corner of the page. It appears when your mouse is anywhere over the plot area, and disappears when you move the cursor outside of it. When scrolling through a long dashboard, scroll back to the top to access the toolbar.
 
 ![Plotly toolbar](assets/interact_toolbar.png)
 
