@@ -295,6 +295,9 @@ def _build_floor_plan(fig, elements, element_height, flip_bend,
                     # producing huge rho = L/ba for nominally straight elements.
                     _th1 = elem.get('flr_theta1', theta)
                     _ba_raw = _th1 - theta
+                    # Wrap to [-pi, pi] to avoid near-2pi angles from
+                    # theta unwrapping across universe boundaries.
+                    _ba_raw = (_ba_raw + np.pi) % (2 * np.pi) - np.pi
                     ba = _ba_raw if abs(_ba_raw) > 1e-4 else 0.0
             else:
                 if abs(ang) > 1e-6:
@@ -373,6 +376,11 @@ def _build_floor_plan_yz(fig, elements, element_height, flip_bend,
             dy_ = elem.get('flr_y1', 0.0) - elem.get('flr_y0', 0.0)
             chord = np.arctan2(dy_, dz) if (abs(dz)>1e-12 or abs(dy_)>1e-12) else 0.0
             e['flr_theta0'] = chord
+            # Set flr_theta1 from phi delta so ba = phi1 - phi0 in YZ plane.
+            # Horizontal bends have no phi change → ba=0 → flat rectangle.
+            phi0 = elem.get('flr_phi0', 0.0)
+            phi1 = elem.get('flr_phi1', phi0)
+            e['flr_theta1'] = chord + (phi1 - phi0)
         # Zero out all bend angles so _build_floor_plan draws every element
         # as a straight rectangle — we handle vertical bend polygons below.
         e['angle'] = 0.0
