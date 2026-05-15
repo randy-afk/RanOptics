@@ -2,7 +2,8 @@
 
 The following examples are generated from the CEBAF lattice at Jefferson Lab using the ELEGANT backend. The same plots can be reproduced identically using the Tao/Bmad backend with the same lattice.
 
-All plots are fully interactive — you can pan, zoom, hover over any element or data point, toggle traces on and off via the legend, and isolate individual panels.
+!!! tip "These plots are fully interactive"
+    Click the links below to open the live HTML version of each plot. You can pan, zoom, hover over any element or data point, and toggle traces on and off via the legend. All panels are linked — zooming on one updates the s-axis range across the entire dashboard. See the [Interactive Plots](interactivity.md) guide for details.
 
 ---
 
