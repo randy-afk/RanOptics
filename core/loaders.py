@@ -721,7 +721,7 @@ def load_elegant(ele_file, log_fn=None, progress_fn=None):
             elegant_data[_col] = _arr2
     # Store all scalar parameters from twi header into data dict
     elegant_data.update({k: v for k, v in twi_params.items()
-                          if isinstance(v, float)})
+                          if isinstance(v, (float, int))})
     return elegant_data
 
 # ─── MAD-X backend ───────────────────────────────────────────────────────────
@@ -957,6 +957,11 @@ def load_madx(twiss_file, survey_file=None, log_fn=None, progress_fn=None):
         'chroma_a': scalars.get('DQ1',  None),
         'chroma_b': scalars.get('DQ2',  None),
     }
+    # Store ALL TFS header scalars so they're available in expression panels
+    for _sk, _sv in scalars.items():
+        if isinstance(_sv, float) and _sk not in bp:
+            bp[_sk.lower()] = _sv
+            bp[_sk] = _sv
 
     P(80, 'MAD-X data loaded.')
     L(f"[madx] Done. {n} elements, s_max={float(s[-1]):.3f} m")
@@ -1305,6 +1310,14 @@ def load_xsuite(json_file, log_fn=None, twiss_method='6d', line_name=None, progr
         bp['tune_b']  = float(tw.qy)
         bp['chroma_a'] = float(tw.dqx) if hasattr(tw,'dqx') else None
         bp['chroma_b'] = float(tw.dqy) if hasattr(tw,'dqy') else None
+        # Store all scalar twiss summary values into beam_params
+        for _twk in dir(tw):
+            if _twk.startswith('_'): continue
+            try:
+                _twv = getattr(tw, _twk)
+                if isinstance(_twv, float) and _twk not in bp:
+                    bp[_twk] = _twv
+            except Exception: pass
     except Exception: pass
 
     def _pad(a, target_n):

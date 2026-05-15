@@ -1,5 +1,5 @@
 # =============================================================================
-# core/gui.py — RanOptics main GUI (LuxV4GUI, _WorkerThread, _FodoLogo)
+# core/gui.py — RanOptics main GUI (RanOpticsGUI, _WorkerThread)
 # =============================================================================
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from core.utils import (
     _parse_yrange, _parse_fp_range,
 )
 from core.engine import plot_optics
+from core.logo  import _RanOpticsLogo
 from core.loaders import load_tao, load_elegant, load_xsuite, _parse_tao_init
 from core.overlays import (
     CustomPanelOverlay, ExprPanelOverlay,
@@ -232,7 +233,7 @@ class _FodoLogo(QWidget):
 
 # ── Main GUI class ────────────────────────────────────────────────────────────
 
-class LuxV4GUI(QMainWindow):
+class RanOpticsGUI(QMainWindow):
     # Signals for cross-thread communication — emitting a Signal is always thread-safe
     _sig_log      = Signal(str, str)   # (text, tag)
     _sig_progress = Signal(int, str)   # (pct, label)
@@ -352,7 +353,7 @@ class LuxV4GUI(QMainWindow):
         h.setStyleSheet(f"background: {MANTLE}; border-bottom: 2px solid {BORDER};")
         row = QHBoxLayout(h); row.setContentsMargins(16, 0, 20, 0); row.setSpacing(8)
 
-        row.addWidget(_FodoLogo())
+        row.addWidget(_RanOpticsLogo())
 
         txt = QWidget(); txt.setStyleSheet(f"background: transparent;")
         tv  = QVBoxLayout(txt); tv.setContentsMargins(6, 8, 0, 8); tv.setSpacing(2)
@@ -362,7 +363,7 @@ class LuxV4GUI(QMainWindow):
         opt = QLabel("Optics"); opt.setFont(FONT_HDR); opt.setStyleSheet(f"color: {ERROR}; background: transparent; letter-spacing: 2px;")
         nr.addWidget(ran); nr.addWidget(opt); nr.addStretch()
         tv.addWidget(name_row)
-        sub = QLabel("Accelerator Optics Plotter  •  v1.2.1"); sub.setFont(FONT_SMALL)
+        sub = QLabel("Accelerator Optics Plotter  •  v1.2.2"); sub.setFont(FONT_SMALL)
         sub.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
         tv.addWidget(sub)
         row.addWidget(txt)
@@ -848,6 +849,7 @@ class LuxV4GUI(QMainWindow):
         self.w_show_yz = _chk(r, "Show Y-Z"); self.w_show_yz.setChecked(True)
         _hint(r, "(floor mode only)")
 
+
         # ── Display ──────────────────────────────────────────────────────────
         _sec(layout, "Display")
         _disp_w = QWidget(); _disp_w.setStyleSheet("background: transparent;")
@@ -991,6 +993,28 @@ class LuxV4GUI(QMainWindow):
                 """)
                 b.clicked.connect(cmd)
                 rh.addWidget(b)
+            # Y-Z ring half selector — only for floor-yz panels
+            if spec == 'floor-yz':
+                _yz_half_val = panel.get('yz_ring_half', 'full')
+                _yz_half_opts = {'full': '½ Full', 'first': '+X', 'second': '-X'}
+                yz_half_btn = QPushButton(_yz_half_opts[_yz_half_val])
+                yz_half_btn.setFixedHeight(26); yz_half_btn.setFont(FONT_SMALL)
+                yz_half_btn.setToolTip('Ring half: Full / +X side (X≥0) / -X side (X<0)')
+                yz_half_btn.setStyleSheet(f"""
+                    QPushButton {{ background: {BORDER}; border-radius: 4px;
+                        color: {FG}; border: none; padding: 0 4px; }}
+                    QPushButton:hover {{ background: {ACCENT2}; color: white; }}
+                """)
+                def _cycle_yz_half(checked=False, p=pos, btn=yz_half_btn):
+                    _cycle = {'full': 'first', 'first': 'second', 'second': 'full'}
+                    _labels = {'full': '½ Full', 'first': '+X', 'second': '-X'}
+                    cur = self._panels[p].get('yz_ring_half', 'full')
+                    nxt = _cycle[cur]
+                    self._panels[p]['yz_ring_half'] = nxt
+                    btn.setText(_labels[nxt])
+                yz_half_btn.clicked.connect(_cycle_yz_half)
+                rh.addWidget(yz_half_btn)
+
             # Annotation toggle — not available for floor plan panels
             _no_annot_panels = {'floor-xz', 'floor-yz'}
             _spec_str = spec if isinstance(spec, str) else spec.get('type', '')
@@ -1101,9 +1125,24 @@ class LuxV4GUI(QMainWindow):
         return [p['spec'] for p in self._panels] if self._panels else ['twiss']
 
     def _get_panel_annotations(self):
-        """Return {panel_index: pattern} for panels with annot_pattern set."""
+        """Return {panel_index: pattern} matching the engine's reordered panel list."""
+        # Engine reorders: floor panels first, bar last — match that order
+        # Use a safe string key for each panel (spec string for presets, _id for dicts)
+        def _spec_key(p):
+            s = p['spec']
+            if isinstance(s, str): return s
+            return s.get('_id', id(s))  # use _id or object id for dict specs
+
+        panels = self._panels or []
+        def _is_floor(p): return isinstance(p['spec'], str) and p['spec'] in ('floor-xz', 'floor-yz')
+        def _is_bar(p):   return p['spec'] == 'bar'
+        _floor = [p for p in panels if _is_floor(p)]
+        _bar   = [p for p in panels if _is_bar(p)]
+        _data  = [p for p in panels if not _is_floor(p) and not _is_bar(p)]
+        reordered = _floor + _data + _bar
+
         result = {}
-        for i, p in enumerate(self._panels):
+        for i, p in enumerate(reordered):
             pat = p.get('annot_pattern', '').strip()
             if pat:
                 result[i] = pat
@@ -1491,6 +1530,8 @@ class LuxV4GUI(QMainWindow):
             color_beampipes=self.w_color_beampipes.isChecked(),
             show_xz=self.w_show_xz.isChecked(),
             show_yz=self.w_show_yz.isChecked(),
+            yz_ring_half=next((p.get('yz_ring_half','full') for p in self._panels if p.get('spec')=='floor-yz'), 'full'),
+            panel_metadata=self._panels,
             show_titles=self.w_show_titles.isChecked(),
             panel_spacing=float(self.w_panel_spacing.text().strip() or '80'),
             compare=self._get_compare_list(),
@@ -1753,6 +1794,7 @@ class LuxV4GUI(QMainWindow):
             'title':      self.w_title.text(),     'elem_h':   self.w_elem_h.text(),
             'elem_h_yz':  self.w_elem_h_yz.text(), 'fp_xz_range': self.w_fp_xz_range.text(),
             'fp_yz_range': self.w_fp_yz_range.text(),
+
             'no_labels':  self.w_no_labels.isChecked(), 'flip_bend': self.w_flip_bend.isChecked(),
             'dark_mode':  self.w_dark.isChecked(), 'png': self.w_png.isChecked(),
             'pdf':        self.w_pdf.isChecked(),  'dpi': self.w_dpi.text(),
@@ -1807,6 +1849,7 @@ class LuxV4GUI(QMainWindow):
         _st(self.w_fs_legend,'fs_legend')
         _sc(self.w_show_xz, 'show_xz')
         _sc(self.w_show_yz, 'show_yz')
+
         _sc(self.w_show_titles, 'show_titles')
         _st(self.w_panel_spacing, 'panel_spacing')
         if 'madx_survey' in data: self.w_madx_survey.setText(str(data.get('madx_survey', '')))

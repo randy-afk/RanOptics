@@ -195,10 +195,19 @@ def _build_floor_plan(fig, elements, element_height, flip_bend,
         _first = next((e for e in elements if 'flr_z0' in e), None)
         pz=[_first['flr_z0']] if _first else [0.0]
         px=[_first['flr_x0']] if _first else [0.0]
+        _prev_z1 = pz[0]; _prev_x1 = px[0]
         for e in elements:
             if 'flr_z1' not in e: continue
-            z1,x1=e['flr_z1'],e['flr_x1']
-            if z1!=pz[-1] or x1!=px[-1]: pz.append(z1); px.append(x1)
+            z0 = e.get('flr_z0', _prev_z1); x0 = e.get('flr_x0', _prev_x1)
+            z1,x1 = e['flr_z1'], e['flr_x1']
+            # Insert None to break line if entry point doesn't match previous exit
+            _gap = abs(z0 - _prev_z1) > 0.01 or abs(x0 - _prev_x1) > 0.01
+            if _gap:
+                pz.append(None); px.append(None)
+                pz.append(z0); px.append(x0)
+            if z1 != pz[-1] or x1 != px[-1]:
+                pz.append(z1); px.append(x1)
+            _prev_z1 = z1; _prev_x1 = x1
     else:
         pz,px=[0.0],[0.0]; xp,yp,tp=0.0,0.0,0.0
         for e in elements:
@@ -275,19 +284,21 @@ def _build_floor_plan(fig, elements, element_height, flip_bend,
                 legend=legend_name,legendgroup=f'{_lg}_{ll}',showlegend=False,hoverinfo='skip'),row=row,col=1)
             continue
         ba=0.0
-        if 'sbend' in kc and abs(ang)>1e-6:
+        if 'sbend' in kc:
             iv = abs(abs(rt) - np.pi/2) < 0.01
             if use_flr:
-                if iv:
-                    ba = 0.0
-                else:
-                    # Derive bend angle from survey geometry — theta1 - theta0
-                    # gives the actual geometric sweep with the correct sign,
-                    # independent of Bmad's ANGLE attribute sign convention.
-                    _th1 = elem.get('flr_theta1', theta + ang)
-                    ba = _th1 - theta
+                if not iv:
+                    # Derive bend angle purely from survey geometry — theta1 - theta0.
+                    # This works even when the LTE ANGLE attribute is zero or missing,
+                    # which is common for ELEGANT where ang comes from LTE parsing.
+                    # Threshold guards against floating point noise in survey theta
+                    # producing huge rho = L/ba for nominally straight elements.
+                    _th1 = elem.get('flr_theta1', theta)
+                    _ba_raw = _th1 - theta
+                    ba = _ba_raw if abs(_ba_raw) > 1e-4 else 0.0
             else:
-                ba = 0.0 if iv else (-ang if flip_bend else ang)
+                if abs(ang) > 1e-6:
+                    ba = 0.0 if iv else (-ang if flip_bend else ang)
         px_,py_=element_polygon(x0,y0,theta,L_,ba,th)
         if abs(ba)>1e-6:
             rho=L_/ba; aa=np.linspace(0,ba,max(30,int(abs(ba)*80)))
@@ -327,7 +338,7 @@ def _trap_band_yz(z0, y0, z1, y1, phi_entry, phi_exit, half_th):
 def _build_floor_plan_yz(fig, elements, element_height, flip_bend,
                          row=2, legend_name='legend5', fp_legend_name='legend6',
                          show_fp_legend=True, beampipe_color='gray',
-                         show_markers=False):
+                         show_markers=False, yz_half='full'):
     import plotly.graph_objects as go
     import copy
 
@@ -337,6 +348,19 @@ def _build_floor_plan_yz(fig, elements, element_height, flip_bend,
     if not show_markers:
         elements = [e for e in elements
                     if e['key'].lower() not in _MARKER_MONITOR_KEYS]
+
+    # Filter by ring half using X coordinate sign
+    # 'first'  = elements with X >= 0 (+X side)
+    # 'second' = elements with X <  0 (-X side)
+    if yz_half in ('first', 'second'):
+        _filtered = []
+        for e in elements:
+            _x = e.get('flr_x1', e.get('flr_x0', 0.0))
+            if yz_half == 'first' and _x >= 0:
+                _filtered.append(e)
+            elif yz_half == 'second' and _x < 0:
+                _filtered.append(e)
+        elements = _filtered
 
     # ── Beampipe: remap flr_y → flr_x and pass to shared builder ─────────────
     remapped = []

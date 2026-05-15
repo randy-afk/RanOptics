@@ -77,6 +77,12 @@ def _eval_expression_tao(expr_str, namespace, data, s_len, log_fn=None):
         else:
             L("[expr] Warning: no live Tao instance for auto-fetch")
     safe_expr = _substitute_dotnames(expr_str, dotnames)
+    # Also replace any slash-containing namespace keys with sanitized versions
+    import re as _re_ev2
+    for _k in namespace:
+        if '/' in _k:
+            _safe = _re_ev2.sub(r'[^a-zA-Z0-9_]', '_', _k)
+            safe_expr = safe_expr.replace(_k, _safe)
     try:
         result = eval(safe_expr, {"__builtins__": {}}, namespace)
         return np.asarray(result, dtype=float)
@@ -220,6 +226,30 @@ def _build_expr_namespace(data, code, extra_attrs=None, log_fn=None, uni_idx=1):
                              for a in unresolved}
                 ns.update({k: v for k, v in extra.items() if k != 's'})
 
+    # ── Scalar parameters ────────────────────────────────────────────────
+    # Load scalar floats from data and beam_params into namespace.
+    # Scalars overwrite any same-named array (e.g. nux column vs nux scalar).
+    # Names with '/' or other invalid chars also stored with '_' substituted.
+    import re as _re_sc
+    def _sc_safe(k): return _re_sc.sub(r'[^a-zA-Z0-9_]', '_', k)
+
+    for _dk, _dv in data.items():
+        if isinstance(_dv, (float, int)) and not isinstance(_dv, bool):
+            ns[_dk] = _dv
+            _s = _sc_safe(_dk)
+            if _s != _dk: ns[_s] = _dv
+
+    bp = data.get('beam_params', {})
+    for _bk, _bv in (bp or {}).items():
+        if _bv is not None:
+            try:
+                _fv = float(_bv)
+                ns[_bk] = _fv
+                _s = _sc_safe(_bk)
+                if _s != _bk: ns[_s] = _fv
+            except (TypeError, ValueError):
+                pass
+
     return ns, data['s']
 
 def _eval_expression(expr_str, namespace, log_fn=None):
@@ -236,10 +266,17 @@ def _eval_expression(expr_str, namespace, log_fn=None):
     """
     def L(m):
         if log_fn: log_fn(m + '\n')
+    # Replace any namespace keys that contain '/' with their sanitized '_' versions
+    # so that e.g. 'dnux/dp' in the expression becomes 'dnux_dp' before eval.
+    import re as _re_ev
+    safe_expr = expr_str
+    for _k in namespace:
+        if '/' in _k:
+            _safe = _re_ev.sub(r'[^a-zA-Z0-9_]', '_', _k)
+            safe_expr = safe_expr.replace(_k, _safe)
     try:
-        result = eval(expr_str, {"__builtins__": {}}, namespace)
+        result = eval(safe_expr, {"__builtins__": {}}, namespace)
         return np.asarray(result, dtype=float)
     except Exception as e:
         L(f"[expr] Error evaluating '{expr_str}': {e}")
         return None
-

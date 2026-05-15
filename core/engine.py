@@ -173,8 +173,8 @@ def _inspect_available_data(input_file, code, log_fn=None,
             ]
 
         elif code == 'elegant':
-            # ── ELEGANT: static extra attributes (no re-run needed) ────────
-            result['extra'] = [
+            # ── ELEGANT: load TWI file to get real columns and scalars ─────
+            _static_extra = [
                 ('etaxp',      "Slope of horizontal dispersion"),
                 ('etayp',      "Slope of vertical dispersion"),
                 ('xAperture',  "Effective horizontal aperture (m)"),
@@ -185,6 +185,20 @@ def _inspect_available_data(input_file, code, log_fn=None,
                 ('dI4',        "Per-element radiation integral I4 (1/m)"),
                 ('dI5',        "Per-element radiation integral I5 (1/m²)"),
             ]
+            result['extra'] = _static_extra
+            try:
+                from core.loaders import _find_sdds, _read_sdds
+                from pathlib import Path as _Path
+                _run_dir = _Path(input_file).parent
+                _twi_file = _find_sdds(_run_dir, '.twi')
+                _, _twi_params = _read_sdds(str(_twi_file), [], read_params=True)
+                result['scalars'] = [
+                    (k, v, "twi scalar parameter")
+                    for k, v in sorted(_twi_params.items())
+                    if isinstance(v, (float, int))
+                ]
+            except Exception:
+                pass
 
         elif code == 'xsuite':
             # ── xsuite: load and inspect twiss table columns ──────────────
@@ -265,6 +279,8 @@ def plot_optics(
     bar_lite=False,          # if True, use floor-plan two-trace method for beamline bar (faster on large lattices)
     show_xz=True,     # show X vs Z floor plan (floor layout)
     show_yz=True,     # show Y vs Z floor plan (floor layout)
+    yz_ring_half='full',  # 'full', 'first', or 'second' — split ring by survey theta
+    panel_metadata=None,  # list of full panel dicts from GUI (for per-panel yz_ring_half)
     show_titles=True, # show subplot titles
     panel_spacing=80,  # vertical spacing between panels in pixels
     panel_heights=None,  # dict: panel_index -> height_px, overrides default per-panel height
@@ -444,6 +460,15 @@ def plot_optics(
         ox = ox[mask]; oy = oy[mask]; pa = pa[mask]; pb = pb[mask]
         elements = [e for e in elements
                     if (e['s_start'] + e['length']) >= s_lo and e['s_start'] <= s_hi]
+        # Write filtered elements back into _all_uni_data so floor plan
+        # loops (_uelems = _ud['elements']) use the range-filtered list.
+        for _uid in _plot_unis:
+            _ud = _all_uni_data[_uid]
+            _ud['elements'] = [e for e in _ud['elements']
+                                if (e['s_start'] + e['length']) >= s_lo and e['s_start'] <= s_hi]
+        # Arc length of the selected range — used as the reference for
+        # floor plan element_height so polygon sizes stay proportional
+        # regardless of how the survey coordinates happen to project.
 
     layout = layout.lower()
 
@@ -573,6 +598,7 @@ def plot_optics(
         else:
             xz_axis_span = yz_axis_span
         xz_height = max(xz_axis_span * xz_ratio, 0.001)
+        # yz_height already computed above
         _primary_xz_height = xz_height
         _primary_yz_height = yz_height
 
@@ -608,7 +634,7 @@ def plot_optics(
                                   beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
                                   show_markers=show_markers)
             if _yz_row is not None:
-                _build_floor_plan_yz(fig, _uelems, yz_height, flip_bend, row=_yz_row,
+                _build_floor_plan_yz(fig, _uelems, yz_height, flip_bend, row=_yz_row, yz_half=yz_ring_half,
                                      legend_name=_el_leg, fp_legend_name=_fp_leg,
                                      show_fp_legend=False,
                                      beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
@@ -668,7 +694,7 @@ def plot_optics(
                     specs=[[{'secondary_y': False}], [{'secondary_y': False}]])
                 _build_floor_plan(cfig, celems, cxz_h, flip_bend, row=1,
                                   legend_name='legend2', fp_legend_name='legend1')
-                _build_floor_plan_yz(cfig, celems, cyz_h, flip_bend, row=2,
+                _build_floor_plan_yz(cfig, celems, cyz_h, flip_bend, row=2, yz_half=yz_ring_half,
                                      legend_name='legend2', fp_legend_name='legend1')
                 cfig.update_layout(height=900, hovermode='closest',
                     legend=dict(x=1.02, y=1.0, xanchor='left'),
@@ -694,7 +720,7 @@ def plot_optics(
                 _build_floor_plan(fig, celems, cxz_h, flip_bend, row=1,
                                   legend_name=f'legend{(ci+1)*2}',
                                   fp_legend_name=f'legend{(ci+1)*2+1}')
-                _build_floor_plan_yz(fig, celems, cyz_h, flip_bend, row=2,
+                _build_floor_plan_yz(fig, celems, cyz_h, flip_bend, row=2, yz_half=yz_ring_half,
                                      legend_name=f'legend{(ci+1)*2}',
                                      fp_legend_name=f'legend{(ci+1)*2+1}')
 
@@ -800,6 +826,7 @@ def plot_optics(
         _primary_xz_height = 0.05
         _primary_yz_height = 0.05
 
+        _floor_panel_idx = 0  # track which floor panel we're building for legend keys
         if 'floor-xz' in panels:
             _prog(50, 'Building floor plan (X-Z)...')
             sign = -1.0 if flip_bend else 1.0
@@ -823,8 +850,9 @@ def plot_optics(
             for _ui, _uid in enumerate(_plot_unis):
                 _ud = _all_uni_data[_uid]
                 _uelems = _ud['elements']
-                _fp_leg = 'legend91' if _ui == 0 else f'legend{90 + _ui * 2 + 1}'
-                _el_leg = 'legend90' if _ui == 0 else f'legend{90 + _ui * 2}'
+                _base = 1000 + _floor_panel_idx * 10
+                _fp_leg = f'legend{_base + 1}' if _ui == 0 else f'legend{_base + _ui * 2 + 1}'
+                _el_leg = f'legend{_base}'     if _ui == 0 else f'legend{_base + _ui * 2}'
                 _build_floor_plan(fig, _uelems, _xz_h, flip_bend,
                                   row=current_row,
                                   legend_name=_el_leg, fp_legend_name=_fp_leg,
@@ -841,8 +869,11 @@ def plot_optics(
                 fig.update_yaxes(title_text='X (m)', row=current_row, col=1,
                                  **({'range': _xz_rng} if _xz_rng else {}))
             current_row += 1
+            _floor_panel_idx += 1
 
-        if 'floor-yz' in panels:
+        # Handle each floor-yz panel separately (user may add multiple with different halves)
+        _yz_panel_list = [p for p in panels if p == 'floor-yz']
+        if _yz_panel_list:
             _prog(52, 'Building floor plan (Y-Z)...')
             _yz_ratio = element_height_yz if element_height_yz is not None else 0.05
             use_flr_y2 = any('flr_y0' in e for e in elements)
@@ -852,14 +883,12 @@ def plot_optics(
                 y_min_fp = min(y_vals) if y_vals else 0.0
                 y_max_fp = max(y_vals) if y_vals else 0.0
                 y_center = (y_min_fp + y_max_fp) / 2.0
-                # Use display range for element height — pad to avoid invisible elements
                 _yz_rng_val = _parse_fp_range(fp_yz_range)
                 if _yz_rng_val:
                     yz_display_span = _yz_rng_val[1] - _yz_rng_val[0]
                 elif y_data_span > 0.01:
                     yz_display_span = y_data_span * 1.4
                 else:
-                    # Very flat — use XZ scale as reference for display
                     yz_display_span = max(_primary_xz_height * 20, 0.002)
                 yz_half = yz_display_span / 2.0
             else:
@@ -868,30 +897,44 @@ def plot_optics(
                 y_center = 0.0; yz_half = yz_display_span / 2.0
             _yz_h = max(yz_display_span * _yz_ratio, 0.001)
             _primary_yz_height = _yz_h
-            for _ui, _uid in enumerate(_plot_unis):
-                _ud = _all_uni_data[_uid]
-                _uelems = _ud['elements']
-                _fp_leg = 'legend91' if _ui == 0 else f'legend{90 + _ui * 2 + 1}'
-                _el_leg = 'legend90' if _ui == 0 else f'legend{90 + _ui * 2}'
-                _build_floor_plan_yz(fig, _uelems, _yz_h, flip_bend,
-                                     row=current_row,
-                                     legend_name=_el_leg, fp_legend_name=_fp_leg,
-                                     show_fp_legend=(_ui == 0 and 'floor-xz' not in panels),
-                                     beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
-                                     show_markers=show_markers)
-            fig.update_xaxes(title_text='Z (m)', row=current_row, col=1)
-            _yz_rng = _parse_fp_range(fp_yz_range)
-            if _tunnel is not None:
-                _, _tyz_y = _draw_tunnel_wall_yz(fig, _tunnel, row=current_row, flip=flip_bend)
-                fig.update_yaxes(title_text='Y (m)', row=current_row, col=1,
-                                 range=_yz_rng if _yz_rng else _tyz_y)
-            else:
-                fig.update_yaxes(title_text='Y (m)', row=current_row, col=1,
-                                 range=_yz_rng if _yz_rng else [y_center - yz_half - _yz_h, y_center + yz_half + _yz_h])
-            current_row += 1
+
+            # Get yz_ring_half per panel occurrence from the panels metadata
+            _yz_ring_halves = [_p_meta.get('yz_ring_half', yz_ring_half)
+                               for _p_meta in (panel_metadata or [])
+                               if _p_meta.get('spec') == 'floor-yz'] if panel_metadata else []
+            # Pad with default if fewer metadata entries than panels
+            while len(_yz_ring_halves) < len(_yz_panel_list):
+                _yz_ring_halves.append(yz_ring_half)
+
+            for _yz_idx in range(len(_yz_panel_list)):
+                _this_half = _yz_ring_halves[_yz_idx]
+                for _ui, _uid in enumerate(_plot_unis):
+                    _ud = _all_uni_data[_uid]
+                    _uelems = _ud['elements']
+                    _base = 1000 + _floor_panel_idx * 10
+                    _fp_leg = f'legend{_base + 1}' if _ui == 0 else f'legend{_base + _ui * 2 + 1}'
+                    _el_leg = f'legend{_base}'     if _ui == 0 else f'legend{_base + _ui * 2}'
+                    _build_floor_plan_yz(fig, _uelems, _yz_h, flip_bend, yz_half=_this_half,
+                                         row=current_row,
+                                         legend_name=_el_leg, fp_legend_name=_fp_leg,
+                                         show_fp_legend=(_ui == 0 and 'floor-xz' not in panels and _yz_idx == 0),
+                                         beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
+                                         show_markers=show_markers)
+                fig.update_xaxes(title_text='Z (m)', row=current_row, col=1)
+                _yz_rng = _parse_fp_range(fp_yz_range)
+                if _tunnel is not None:
+                    _, _tyz_y = _draw_tunnel_wall_yz(fig, _tunnel, row=current_row, flip=flip_bend)
+                    fig.update_yaxes(title_text='Y (m)', row=current_row, col=1,
+                                     range=_yz_rng if _yz_rng else _tyz_y)
+                else:
+                    fig.update_yaxes(title_text='Y (m)', row=current_row, col=1,
+                                     range=_yz_rng if _yz_rng else [y_center - yz_half - _yz_h, y_center + yz_half + _yz_h])
+                current_row += 1
+                _floor_panel_idx += 1
 
         # Data panels
         first_s_row = current_row
+        _last_data_row = None
         _tune_annotated = False  # only annotate once on first data panel
         # In lite mode build element name lookup array once for all panels
         _elem_names = _make_elem_name_array(s, elements) if bar_lite else None
@@ -906,6 +949,7 @@ def plot_optics(
             # ── Skip floor panels — already rendered above ─────────────────
             if p in ('floor-xz', 'floor-yz'):
                 continue
+            _last_data_row = current_row
 
             # ── Beamline bar panel ────────────────────────────────────────
             if p == 'bar':
@@ -986,6 +1030,10 @@ def plot_optics(
                 _eref = f'x{first_s_row}' if first_s_row > 1 else 'x'
                 if current_row != first_s_row:
                     fig.update_xaxes(matches=_eref, row=current_row, col=1)
+                _annot_pat = (panel_annotations or {}).get(i, '') or p.get('annot_pattern', '').strip()
+                if _annot_pat:
+                    _build_panel_annotations(fig, elements, _annot_pat, row=current_row,
+                                             annot_font_size=int((font_sizes or {}).get('annot', 8)))
                 current_row += 1
                 continue
             if _multi:
@@ -1091,10 +1139,9 @@ def plot_optics(
             current_row += 1
 
         # If no bar panel in list, put s-axis label on last data panel
-        if not include_bar:
-            last_data_row = current_row - 1
+        if not include_bar and _last_data_row is not None:
             fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
-                             row=last_data_row, col=1)
+                             row=_last_data_row, col=1)
 
         # Figure-level layout — height already set above from panel_heights
         fig_h = total_h
@@ -1165,15 +1212,16 @@ def plot_optics(
 
         row_idx = 0
         if include_floor:
-            # One legend pair per universe — for floor-xz and floor-yz rows
-            n_floor_rows = len(_floor_panels)
+            # Each floor panel gets its own legend pair keyed by panel index
             for _fi, _fp in enumerate(_floor_panels):
                 for _ui in range(len(_plot_unis)):
-                    _fp_leg = 'legend91' if _ui == 0 else f'legend{90 + _ui * 2 + 1}'
-                    _el_leg = 'legend90' if _ui == 0 else f'legend{90 + _ui * 2}'
+                    # Use unique legend keys per floor panel index to avoid overwriting
+                    _base = 1000 + _fi * 10  # e.g. 1000, 1010, 1020 for floor panels 0,1,2
+                    _fp_leg = f'legend{_base + 1}' if _ui == 0 else f'legend{_base + _ui * 2 + 1}'
+                    _el_leg = f'legend{_base}'     if _ui == 0 else f'legend{_base + _ui * 2}'
                     if row_idx < len(row_tops):
-                        lkw[_fp_leg] = _lgd(row_idx, pos_key=_fp)
-                        lkw[_el_leg] = _lgd(row_idx, pos_key=_fp)
+                        lkw[_fp_leg] = _lgd(row_idx, pos_key=f'{_fp}_{_fi}')
+                        lkw[_el_leg] = _lgd(row_idx, pos_key=f'{_fp}_{_fi}')
                 row_idx += 1
 
         for i, p in enumerate(panels):
