@@ -4,6 +4,8 @@ Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
 ## [1.2.2] - 2026-05
 ### Fixed
+- Dipole polygon bend angle wrapped to [-π, π] to fix circle shapes in multi-universe plots
+- Horizontal bends now draw as flat rectangles in YZ floor plan
 - srange filter now correctly applies to floor plan panels (XZ and YZ)
 - Floor plan YZ x-axis label corrected from "s (m)" to "Z (m)"
 - ELEGANT loader: added flr_theta1 for correct dipole polygon bend shape

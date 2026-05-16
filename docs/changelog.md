@@ -2,6 +2,16 @@
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 ---
+## [1.2.2] - 2026-05
+### Fixed
+- Dipole polygon bend angle wrapped to [-π, π] to fix circle shapes in multi-universe plots
+- Horizontal bends now draw as flat rectangles in YZ floor plan
+- srange filter now correctly applies to floor plan panels (XZ and YZ)
+- Floor plan YZ x-axis label corrected from "s (m)" to "Z (m)"
+- ELEGANT loader: added flr_theta1 for correct dipole polygon bend shape
+- xsuite loader: added flr_theta1 for correct dipole polygon bend shape
+- Floor plan s-axis label no longer stamped on floor plan rows when bar panel is absent
+---
 ## [1.2.1] — 2026-05
 ### Fixed
 - **Y-axis alignment** across all panels — secondary y-axis (Dispersion on Twiss panel) had `domain=None` causing each subplot to independently size its left boundary. Fixed by copying domain from primary to secondary y-axes after layout is applied.
