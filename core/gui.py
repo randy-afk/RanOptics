@@ -10,6 +10,7 @@ import numpy as np
 from PySide6.QtCore    import Qt, QThread, Signal, QTimer, QSize
 from PySide6.QtGui     import QAction, QColor, QFont, QPainter, QPen, QBrush, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
+    QColorDialog,
     QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMenuBar, QMessageBox, QProgressBar, QPushButton,
@@ -278,6 +279,10 @@ class RanOpticsGUI(QMainWindow):
                               {'name': 'Twiss & Dispersion', 'spec': 'twiss'},
                               {'name': 'Beamline Bar',       'spec': 'bar'}]
         self._panel_rows  = []
+        # Element color overrides — persisted in presets
+        self._elem_colors = {}
+        # Color swatch buttons — keyed by element type key
+        self._color_btns  = {}
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -363,7 +368,7 @@ class RanOpticsGUI(QMainWindow):
         opt = QLabel("Optics"); opt.setFont(FONT_HDR); opt.setStyleSheet(f"color: {ERROR}; background: transparent; letter-spacing: 2px;")
         nr.addWidget(ran); nr.addWidget(opt); nr.addStretch()
         tv.addWidget(name_row)
-        sub = QLabel("Accelerator Optics Plotter  •  v1.2.2"); sub.setFont(FONT_SMALL)
+        sub = QLabel("Accelerator Optics Plotter  •  v1.3.0"); sub.setFont(FONT_SMALL)
         sub.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
         tv.addWidget(sub)
         row.addWidget(txt)
@@ -566,7 +571,7 @@ class RanOpticsGUI(QMainWindow):
         self._tab_r = QTabWidget(); self._tab_r.setStyleSheet(_TAB_SS); self._tab_r.setFont(FONT_SEC)
 
         for name in ("Input", "Beam Settings"):   self._tab_l.addTab(QWidget(), name)
-        for name in ("Panels", "Visual", "Export"): self._tab_r.addTab(QWidget(), name)
+        for name in ("Panels", "Visual", "Export", "Colors"): self._tab_r.addTab(QWidget(), name)
 
         # Wrap each tab's QWidget in a scroll area
         def _scroll_tab(tab_widget, idx):
@@ -582,6 +587,7 @@ class RanOpticsGUI(QMainWindow):
         self._panels_layout = _scroll_tab(self._tab_r, 0)
         self._visual_layout = _scroll_tab(self._tab_r, 1)
         self._export_layout = _scroll_tab(self._tab_r, 2)
+        self._colors_layout = _scroll_tab(self._tab_r, 3)
 
         outer_h.addWidget(self._tab_l, 1)
         outer_h.addWidget(self._tab_r, 1)
@@ -589,7 +595,8 @@ class RanOpticsGUI(QMainWindow):
 
         # Remove trailing stretch from each, build content, re-add stretch
         for lay in (self._input_layout, self._beam_layout,
-                    self._panels_layout, self._visual_layout, self._export_layout):
+                    self._panels_layout, self._visual_layout, self._export_layout,
+                    self._colors_layout):
             lay.takeAt(lay.count() - 1)  # remove placeholder stretch
 
         self._build_input_section(self._input_layout)
@@ -597,9 +604,11 @@ class RanOpticsGUI(QMainWindow):
         self._build_panels_section(self._panels_layout)
         self._build_visual_section(self._visual_layout)
         self._build_export_section(self._export_layout)
+        self._build_colors_section(self._colors_layout)
 
         for lay in (self._input_layout, self._beam_layout,
-                    self._panels_layout, self._visual_layout, self._export_layout):
+                    self._panels_layout, self._visual_layout, self._export_layout,
+                    self._colors_layout):
             lay.addStretch(1)
 
     # ── Input section ─────────────────────────────────────────────────────────
@@ -899,6 +908,82 @@ class RanOpticsGUI(QMainWindow):
         _help(layout, "Leave blank to use Plotly defaults.")
 
     # ── Export section ────────────────────────────────────────────────────────
+
+    # ── Colors section ───────────────────────────────────────────────────────
+
+    def _build_colors_section(self, layout):
+        from core.utils import _ELEM_COLOR_DEFAULTS
+        _sec(layout, "Element Colors")
+        _help(layout, "Click a swatch to change the color for that element type. "
+                      "Colors are saved with presets.")
+
+        _ELEM_LABELS = [
+            ('sbend',      'Dipole'),
+            ('quadrupole', 'Quadrupole'),
+            ('sextupole',  'Sextupole'),
+            ('kicker',     'Kicker'),
+            ('monitor',    'Monitor'),
+            ('marker',     'Marker'),
+            ('rfcavity',   'RF Cavity'),
+            ('lcavity',    'Linac Cavity'),
+        ]
+
+        for key, label in _ELEM_LABELS:
+            r = _row(layout)
+            _lbl(r, label, width=120)
+            default = _ELEM_COLOR_DEFAULTS.get(key, '#888888')
+            current = self._elem_colors.get(key, default)
+            btn = QPushButton()
+            btn.setFixedSize(48, 24)
+            btn.setToolTip(f"Click to change {label} color")
+            self._set_swatch(btn, current)
+            btn.clicked.connect(lambda checked, k=key, b=btn: self._pick_color(k, b))
+            self._color_btns[key] = btn
+            r.addWidget(btn)
+
+            # Reset button
+            rst = QPushButton("↺")
+            rst.setFixedSize(28, 24)
+            rst.setFont(FONT_MAIN)
+            rst.setToolTip(f"Reset to default")
+            rst.setStyleSheet(f"""
+                QPushButton {{
+                    background: {PANEL}; border: 1px solid {BORDER};
+                    border-radius: 6px; color: {FG_DIM};
+                }}
+                QPushButton:hover {{ color: {ACCENT}; border-color: {ACCENT}; }}
+            """)
+            rst.clicked.connect(lambda checked, k=key, b=btn, d=default: self._reset_color(k, b, d))
+            r.addWidget(rst)
+            r.addStretch()
+
+    def _set_swatch(self, btn, color):
+        """Set swatch button background to color."""
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {color}; border: 1px solid {BORDER};
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{ border-color: {ACCENT}; }}
+        """)
+        btn.setProperty("color", color)
+
+    def _pick_color(self, key, btn):
+        """Open color dialog and update swatch + _elem_colors."""
+        from core.utils import _ELEM_COLOR_DEFAULTS
+        current = self._elem_colors.get(key, _ELEM_COLOR_DEFAULTS.get(key, '#888888'))
+        from PySide6.QtGui import QColor
+        init = QColor(current)
+        chosen = QColorDialog.getColor(init, self, f"Choose color")
+        if chosen.isValid():
+            hex_color = chosen.name()
+            self._elem_colors[key] = hex_color
+            self._set_swatch(btn, hex_color)
+
+    def _reset_color(self, key, btn, default):
+        """Reset element color to default."""
+        self._elem_colors.pop(key, None)
+        self._set_swatch(btn, default)
 
     def _build_export_section(self, layout):
         r = _row(layout)
@@ -1537,6 +1622,7 @@ class RanOpticsGUI(QMainWindow):
             compare=self._get_compare_list(),
             compare_mode=self.w_compare_mode.currentText().lower().replace(' ', '').replace('(%)', '%'),
             normalize_s=self.w_normalize_s.isChecked(),
+            elem_colors=self._elem_colors if self._elem_colors else None,
         )
 
     # ── Run / cancel ──────────────────────────────────────────────────────────
@@ -1815,6 +1901,7 @@ class RanOpticsGUI(QMainWindow):
             'show_titles':     self.w_show_titles.isChecked(),
             'panel_spacing':   self.w_panel_spacing.text().strip(),
             'madx_survey':     self.w_madx_survey.text().strip(),
+            'elem_colors':     dict(self._elem_colors),
         }
 
     def _apply_preset(self, data):
@@ -1868,6 +1955,13 @@ class RanOpticsGUI(QMainWindow):
         if 'compare_files' in data:
             self._compare_files = list(data['compare_files'])
             self._render_compare_list()
+
+        if 'elem_colors' in data:
+            from core.utils import _ELEM_COLOR_DEFAULTS
+            self._elem_colors = dict(data['elem_colors'])
+            for key, btn in self._color_btns.items():
+                color = self._elem_colors.get(key, _ELEM_COLOR_DEFAULTS.get(key, '#888888'))
+                self._set_swatch(btn, color)
 
         self._update_emit_ui()
 

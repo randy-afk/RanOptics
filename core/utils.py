@@ -20,16 +20,32 @@ from core.themes import (
 
 # ── Element visual helpers ────────────────────────────────────────────────────
 
-def element_color(key):
+# Default element colors — overridden by user via Colors tab
+_ELEM_COLOR_DEFAULTS = {
+    'sbend':      'red',
+    'quadrupole': 'blue',
+    'sextupole':  'green',
+    'kicker':     'orange',
+    'monitor':    'purple',
+    'marker':     '#888888',
+    'rfcavity':   'cyan',
+    'lcavity':    'cyan',
+}
+
+def element_color(key, elem_colors=None):
+    """Return the plot color for an element type.
+    elem_colors: optional dict mapping type key (e.g. 'sbend') to hex/name color.
+    """
     k = key.lower()
-    if 'quadrupole' in k: return 'blue'
-    if 'sbend'      in k: return 'red'
-    if 'sextupole'  in k: return 'green'
-    if k in ('hkicker', 'vkicker', 'kicker'): return 'orange'
-    if 'monitor'    in k: return 'purple'
-    if 'marker'     in k: return '#888888'
-    if 'rfcavity'   in k: return 'cyan'
-    if 'lcavity'    in k: return 'cyan'
+    ec = elem_colors or {}
+    if 'sbend'      in k: return ec.get('sbend',      _ELEM_COLOR_DEFAULTS['sbend'])
+    if 'quadrupole' in k: return ec.get('quadrupole', _ELEM_COLOR_DEFAULTS['quadrupole'])
+    if 'sextupole'  in k: return ec.get('sextupole',  _ELEM_COLOR_DEFAULTS['sextupole'])
+    if k in ('hkicker', 'vkicker', 'kicker'): return ec.get('kicker', _ELEM_COLOR_DEFAULTS['kicker'])
+    if 'monitor'    in k: return ec.get('monitor',    _ELEM_COLOR_DEFAULTS['monitor'])
+    if 'marker'     in k: return ec.get('marker',     _ELEM_COLOR_DEFAULTS['marker'])
+    if 'rfcavity'   in k: return ec.get('rfcavity',   _ELEM_COLOR_DEFAULTS['rfcavity'])
+    if 'lcavity'    in k: return ec.get('lcavity',    _ELEM_COLOR_DEFAULTS['lcavity'])
     return None
 
 FULL_WIDTH_TYPES = ('sbend', 'quadrupole')

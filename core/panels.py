@@ -163,7 +163,7 @@ def _draw_tunnel_wall_yz(fig, wall, row=2, flip=False):
 def _build_floor_plan(fig, elements, element_height, flip_bend,
                       row=1, legend_name='legend3', fp_legend_name='legend4',
                       show_fp_legend=True, beampipe_color='gray',
-                      show_markers=False):
+                      show_markers=False, elem_colors=None):
     # Use fp_legend_name for everything - one legend box per call
     legend_name = fp_legend_name
     import plotly.graph_objects as go
@@ -236,7 +236,7 @@ def _build_floor_plan(fig, elements, element_height, flip_bend,
     _lg = legend_name  # shorthand for prefix
     for elem in elements:
         L_=elem['length']; ang=elem.get('angle',0.0); key=elem['key']
-        color=element_color(key); rt=elem.get('ref_tilt',0.0)
+        color=element_color(key, elem_colors); rt=elem.get('ref_tilt',0.0)
         hover=make_hover(elem); th=element_thickness(key,element_height); kc=key.lower()
         ll=_lt.get(kc); sl=ll is not None and ll not in la
         if sl: la.add(ll)
@@ -284,24 +284,19 @@ def _build_floor_plan(fig, elements, element_height, flip_bend,
                 legend=legend_name,legendgroup=f'{_lg}_{ll}',showlegend=False,hoverinfo='skip'),row=row,col=1)
             continue
         ba=0.0
-        if 'sbend' in kc:
+        if 'sbend' in kc and abs(ang)>1e-6:
             iv = abs(abs(rt) - np.pi/2) < 0.01
             if use_flr:
-                if not iv:
-                    # Derive bend angle purely from survey geometry — theta1 - theta0.
-                    # This works even when the LTE ANGLE attribute is zero or missing,
-                    # which is common for ELEGANT where ang comes from LTE parsing.
-                    # Threshold guards against floating point noise in survey theta
-                    # producing huge rho = L/ba for nominally straight elements.
-                    _th1 = elem.get('flr_theta1', theta)
-                    _ba_raw = _th1 - theta
-                    # Wrap to [-pi, pi] to avoid near-2pi angles from
-                    # theta unwrapping across universe boundaries.
-                    _ba_raw = (_ba_raw + np.pi) % (2 * np.pi) - np.pi
-                    ba = _ba_raw if abs(_ba_raw) > 1e-4 else 0.0
+                if iv:
+                    ba = 0.0
+                else:
+                    # Derive bend angle from survey geometry — theta1 - theta0
+                    # gives the actual geometric sweep with the correct sign,
+                    # independent of Bmad's ANGLE attribute sign convention.
+                    _th1 = elem.get('flr_theta1', theta + ang)
+                    ba = _th1 - theta
             else:
-                if abs(ang) > 1e-6:
-                    ba = 0.0 if iv else (-ang if flip_bend else ang)
+                ba = 0.0 if iv else (-ang if flip_bend else ang)
         px_,py_=element_polygon(x0,y0,theta,L_,ba,th)
         if abs(ba)>1e-6:
             rho=L_/ba; aa=np.linspace(0,ba,max(30,int(abs(ba)*80)))
@@ -341,7 +336,7 @@ def _trap_band_yz(z0, y0, z1, y1, phi_entry, phi_exit, half_th):
 def _build_floor_plan_yz(fig, elements, element_height, flip_bend,
                          row=2, legend_name='legend5', fp_legend_name='legend6',
                          show_fp_legend=True, beampipe_color='gray',
-                         show_markers=False, yz_half='full'):
+                         show_markers=False, yz_half='full', elem_colors=None):
     import plotly.graph_objects as go
     import copy
 
@@ -376,11 +371,6 @@ def _build_floor_plan_yz(fig, elements, element_height, flip_bend,
             dy_ = elem.get('flr_y1', 0.0) - elem.get('flr_y0', 0.0)
             chord = np.arctan2(dy_, dz) if (abs(dz)>1e-12 or abs(dy_)>1e-12) else 0.0
             e['flr_theta0'] = chord
-            # Set flr_theta1 from phi delta so ba = phi1 - phi0 in YZ plane.
-            # Horizontal bends have no phi change → ba=0 → flat rectangle.
-            phi0 = elem.get('flr_phi0', 0.0)
-            phi1 = elem.get('flr_phi1', phi0)
-            e['flr_theta1'] = chord + (phi1 - phi0)
         # Zero out all bend angles so _build_floor_plan draws every element
         # as a straight rectangle — we handle vertical bend polygons below.
         e['angle'] = 0.0
@@ -390,7 +380,8 @@ def _build_floor_plan_yz(fig, elements, element_height, flip_bend,
     # Draw beampipe + all non-vertical-bend elements via shared routine
     _build_floor_plan(fig, remapped, element_height, flip_bend, row=row,
                       legend_name=legend_name, fp_legend_name=fp_legend_name,
-                      show_fp_legend=show_fp_legend, beampipe_color=beampipe_color)
+                      show_fp_legend=show_fp_legend, beampipe_color=beampipe_color,
+                      elem_colors=elem_colors)
 
     if not use_flr:
         # ── Dead-reckoning YZ path (Tao without survey coords) ───────────────
@@ -434,7 +425,7 @@ def _build_floor_plan_yz(fig, elements, element_height, flip_bend,
             L_   = elem['length']; ang = elem.get('angle', 0.0); key = elem['key']
             rt   = elem.get('ref_tilt', 0.0)
             iv   = abs(abs(rt) - np.pi/2) < 0.01
-            color = element_color(key)
+            color = element_color(key, elem_colors)
             hover = make_hover(elem)
             th    = element_thickness(key, element_height)
             kc    = key.lower()
@@ -516,7 +507,7 @@ def _build_floor_plan_yz(fig, elements, element_height, flip_bend,
         if not zs:
             continue
 
-        color = element_color(elem['key'])
+        color = element_color(elem['key'], elem_colors)
         hover = make_hover(elem)
         ll = 'Dipole'
         sl = ll not in la
@@ -774,7 +765,7 @@ def _build_latdiff_panel(fig, elems_a, elems_b, label_a, label_b, row=1):
     ), row=row + 2, col=1)
 
 
-def _build_layout_bar(fig, elements, show_labels, row=4, show_markers=False, bar_lite=False):
+def _build_layout_bar(fig, elements, show_labels, row=4, show_markers=False, bar_lite=False, elem_colors=None):
     import plotly.graph_objects as go
     _MARKER_MONITOR_KEYS = {'marker','mark','monitor','hmon','vmon','instrument','bpm'}
     if not show_markers:
@@ -794,7 +785,7 @@ def _build_layout_bar(fig, elements, show_labels, row=4, show_markers=False, bar
         _lg = f'bar_lite_{row}'
         for elem in elements:
             s0=elem['s_start']; L_=elem['length']; key=elem['key']
-            color=element_color(key); kl=key.lower()
+            color=element_color(key, elem_colors); kl=key.lower()
             hover=make_hover(elem)
             ll=_lt.get(kl)
             if L_==0:
@@ -861,7 +852,7 @@ def _build_layout_bar(fig, elements, show_labels, row=4, show_markers=False, bar
         # ── Standard mode — original add_shape + invisible point scatter ──────
         for elem in elements:
             s0=elem['s_start']; L_=elem['length']; key=elem['key']
-            color=element_color(key); hover=make_hover(elem); short=elem['name'].split('\\')[-1]
+            color=element_color(key, elem_colors); hover=make_hover(elem); short=elem['name'].split('\\')[-1]
             kl=key.lower()
             if L_==0:
                 # Zero-length element — thin vertical line

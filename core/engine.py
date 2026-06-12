@@ -293,6 +293,7 @@ def plot_optics(
     compare=None,        # list of {'file':..., 'code':..., 'label':...}
     compare_mode='overlay',  # 'overlay', 'separate', 'difference', 'difference%'
     normalize_s=False,   # if True, plot s/s_max so all files share [0,1]
+    elem_colors=None,    # dict mapping element type key to color, e.g. {'sbend': '#ff0000'}
 ):
     """
     panels : list of panel types to include, in display order.
@@ -460,15 +461,6 @@ def plot_optics(
         ox = ox[mask]; oy = oy[mask]; pa = pa[mask]; pb = pb[mask]
         elements = [e for e in elements
                     if (e['s_start'] + e['length']) >= s_lo and e['s_start'] <= s_hi]
-        # Write filtered elements back into _all_uni_data so floor plan
-        # loops (_uelems = _ud['elements']) use the range-filtered list.
-        for _uid in _plot_unis:
-            _ud = _all_uni_data[_uid]
-            _ud['elements'] = [e for e in _ud['elements']
-                                if (e['s_start'] + e['length']) >= s_lo and e['s_start'] <= s_hi]
-        # Arc length of the selected range — used as the reference for
-        # floor plan element_height so polygon sizes stay proportional
-        # regardless of how the survey coordinates happen to project.
 
     layout = layout.lower()
 
@@ -598,7 +590,6 @@ def plot_optics(
         else:
             xz_axis_span = yz_axis_span
         xz_height = max(xz_axis_span * xz_ratio, 0.001)
-        # yz_height already computed above
         _primary_xz_height = xz_height
         _primary_yz_height = yz_height
 
@@ -632,13 +623,13 @@ def plot_optics(
                                   legend_name=_el_leg, fp_legend_name=_fp_leg,
                                   show_fp_legend=(_ui == 0),
                                   beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
-                                  show_markers=show_markers)
+                                  show_markers=show_markers, elem_colors=elem_colors)
             if _yz_row is not None:
                 _build_floor_plan_yz(fig, _uelems, yz_height, flip_bend, row=_yz_row, yz_half=yz_ring_half,
                                      legend_name=_el_leg, fp_legend_name=_fp_leg,
                                      show_fp_legend=False,
                                      beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
-                                     show_markers=show_markers)
+                                     show_markers=show_markers, elem_colors=elem_colors)
         flr_lkw = dict(height=900, hovermode='closest',
             xaxis=dict(domain=[0.0, 0.95]))
         if _n_floor_rows == 2:
@@ -693,9 +684,11 @@ def plot_optics(
                     subplot_titles=((f'Floor Plan (X-Z) — {clabel}', f'Floor Plan (Y-Z) — {clabel}') if show_titles else ('', '')),
                     specs=[[{'secondary_y': False}], [{'secondary_y': False}]])
                 _build_floor_plan(cfig, celems, cxz_h, flip_bend, row=1,
-                                  legend_name='legend2', fp_legend_name='legend1')
+                                  legend_name='legend2', fp_legend_name='legend1',
+                                  elem_colors=elem_colors)
                 _build_floor_plan_yz(cfig, celems, cyz_h, flip_bend, row=2, yz_half=yz_ring_half,
-                                     legend_name='legend2', fp_legend_name='legend1')
+                                     legend_name='legend2', fp_legend_name='legend1',
+                                     elem_colors=elem_colors)
                 cfig.update_layout(height=900, hovermode='closest',
                     legend=dict(x=1.02, y=1.0, xanchor='left'),
                     legend2=dict(x=1.02, y=0.55, xanchor='left'),
@@ -719,10 +712,12 @@ def plot_optics(
                 cxz_h, cyz_h, _, _ = _floor_heights(celems, cpdata)
                 _build_floor_plan(fig, celems, cxz_h, flip_bend, row=1,
                                   legend_name=f'legend{(ci+1)*2}',
-                                  fp_legend_name=f'legend{(ci+1)*2+1}')
+                                  fp_legend_name=f'legend{(ci+1)*2+1}',
+                                  elem_colors=elem_colors)
                 _build_floor_plan_yz(fig, celems, cyz_h, flip_bend, row=2, yz_half=yz_ring_half,
                                      legend_name=f'legend{(ci+1)*2}',
-                                     fp_legend_name=f'legend{(ci+1)*2+1}')
+                                     fp_legend_name=f'legend{(ci+1)*2+1}',
+                                     elem_colors=elem_colors)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # LAYOUT: all / optics — dynamic panels
@@ -858,7 +853,7 @@ def plot_optics(
                                   legend_name=_el_leg, fp_legend_name=_fp_leg,
                                   show_fp_legend=(_ui == 0),
                                   beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
-                                  show_markers=show_markers)
+                                  show_markers=show_markers, elem_colors=elem_colors)
             fig.update_xaxes(title_text='Z (m)', row=current_row, col=1)
             _xz_rng = _parse_fp_range(fp_xz_range)
             if _tunnel is not None:
@@ -919,7 +914,7 @@ def plot_optics(
                                          legend_name=_el_leg, fp_legend_name=_fp_leg,
                                          show_fp_legend=(_ui == 0 and 'floor-xz' not in panels and _yz_idx == 0),
                                          beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
-                                         show_markers=show_markers)
+                                         show_markers=show_markers, elem_colors=elem_colors)
                 fig.update_xaxes(title_text='Z (m)', row=current_row, col=1)
                 _yz_rng = _parse_fp_range(fp_yz_range)
                 if _tunnel is not None:
@@ -934,7 +929,6 @@ def plot_optics(
 
         # Data panels
         first_s_row = current_row
-        _last_data_row = None
         _tune_annotated = False  # only annotate once on first data panel
         # In lite mode build element name lookup array once for all panels
         _elem_names = _make_elem_name_array(s, elements) if bar_lite else None
@@ -949,12 +943,12 @@ def plot_optics(
             # ── Skip floor panels — already rendered above ─────────────────
             if p in ('floor-xz', 'floor-yz'):
                 continue
-            _last_data_row = current_row
 
             # ── Beamline bar panel ────────────────────────────────────────
             if p == 'bar':
                 _build_layout_bar(fig, elements, show_element_labels, row=current_row,
-                                  show_markers=show_markers_bar, bar_lite=bar_lite)
+                                  show_markers=show_markers_bar, bar_lite=bar_lite,
+                                  elem_colors=elem_colors)
                 _bar_annot = (panel_annotations or {}).get(i, '')
                 if not _bar_annot and isinstance(p, dict):
                     _bar_annot = p.get('annot_pattern', '').strip()
@@ -1139,9 +1133,10 @@ def plot_optics(
             current_row += 1
 
         # If no bar panel in list, put s-axis label on last data panel
-        if not include_bar and _last_data_row is not None:
+        if not include_bar:
+            last_data_row = current_row - 1
             fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
-                             row=_last_data_row, col=1)
+                             row=last_data_row, col=1)
 
         # Figure-level layout — height already set above from panel_heights
         fig_h = total_h
@@ -1321,7 +1316,8 @@ def plot_optics(
                 fp_fig = _make_group_fig(n_grp, fp_titles, fp_specs, grp_h, fp_lkw)
                 # Primary floor row — fp icons go to 'legend', traces to 'legend2'
                 _build_floor_plan(fp_fig, elements, _primary_xz_height, flip_bend,
-                                  row=1, legend_name='legend2', fp_legend_name='legend')
+                                  row=1, legend_name='legend2', fp_legend_name='legend',
+                                  elem_colors=elem_colors)
                 fp_fig.update_xaxes(title_text='Z (m)', row=1, col=1)
                 fp_fig.update_yaxes(title_text='X (m)', row=1, col=1)
                 # Compare floor rows — each gets its own pair of legend slots
@@ -1332,7 +1328,8 @@ def plot_optics(
                     _build_floor_plan(fp_fig, c['elems'], cxz_h, flip_bend,
                                       row=ri,
                                       legend_name=el_leg_name,
-                                      fp_legend_name=fp_leg_name)
+                                      fp_legend_name=fp_leg_name,
+                                      elem_colors=elem_colors)
                     fp_fig.update_xaxes(title_text='Z (m)', row=ri, col=1)
                     fp_fig.update_yaxes(title_text='X (m)', row=ri, col=1,
                                         **({'range': cxz_rng} if cxz_rng else {}))
@@ -1394,14 +1391,16 @@ def plot_optics(
                 bar_fig.update_layout(height=80 + n_grp * 100,
                                       title=dict(text='Beamline', x=0.5, xanchor='center'))
                 _build_layout_bar(bar_fig, elements, show_element_labels, row=1,
-                                  show_markers=show_markers_bar, bar_lite=bar_lite)
+                                  show_markers=show_markers_bar, bar_lite=bar_lite,
+                                  elem_colors=elem_colors)
                 bar_fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
                                      row=1, col=1)
                 bar_fig.update_yaxes(title_text='', showticklabels=False,
                                      range=[-0.4, 0.4], row=1, col=1)
                 for ri, c in enumerate(_csep, start=2):
                     _build_layout_bar(bar_fig, c['elems'], show_element_labels, row=ri,
-                                      show_markers=show_markers_bar, bar_lite=bar_lite)
+                                      show_markers=show_markers_bar, bar_lite=bar_lite,
+                                      elem_colors=elem_colors)
                     bar_fig.update_yaxes(title_text='', showticklabels=False,
                                          range=[-0.4, 0.4], row=ri, col=1)
                 if not hasattr(fig, '_compare_figs'): fig._compare_figs = []

@@ -2,6 +2,13 @@
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
+## [1.3.0] - 2026-05
+### Added
+- Colors tab in right panel — per-element-type color customization
+- Color picker with swatch buttons and reset-to-default for each element type
+- Element colors persisted in presets (saved to JSON)
+- elem_colors parameter added to plot_optics() and threaded through all panel builders
+---
 ## [1.2.2] - 2026-05
 ### Fixed
 - Dipole polygon bend angle wrapped to [-π, π] to fix circle shapes in multi-universe plots
