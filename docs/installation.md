@@ -77,5 +77,5 @@ pip install kaleido
 ## Running RanOptics
 
 ```bash
-python RanOptics_new.py
+python RanOptics.py
 ```

@@ -21,8 +21,61 @@ from core.panels import (
     _build_custom_panel, _build_expr_panel,
     _build_panel_annotations, _build_tune_annotation,
     _make_elem_name_array, _read_tunnel_wall,
+    _draw_tunnel_wall_xz, _draw_tunnel_wall_yz,
 )
 from core.expr import _build_expr_namespace
+
+# ─── Unified floor-plan sizing ───────────────────────────────────────────────
+# ONE rule for element height across every plane (XZ, YZ) and every layout
+# (dedicated floor, panels, grid, compare, popup):
+#
+#     element height = ratio * (resolved transverse span)
+#
+# The transverse span is resolved once, in priority order:
+#   1. user range (fp_xz_range / fp_yz_range), if given
+#   2. data extent * pad, when the transverse spread is meaningful
+#   3. a fixed fraction of the longitudinal (Z) extent, for straight/planar
+#      machines whose transverse spread collapses to ~0
+#
+# The axis is always centered on the data mean, so a machine whose survey
+# coordinates are offset from the origin is handled the same as one at (0,0)
+# — this removes the old "non-zero start looks weird" degeneracy.
+def _floor_sizing(transverse_vals, z_extent, user_range, ratio,
+                  pad=1.2, degenerate_frac=0.02, min_h=1e-3):
+    """Return (height, center, half_span) for a floor-plan plane.
+
+    transverse_vals : list of transverse coords (X for XZ, Y for YZ); may be empty
+    z_extent        : longitudinal extent in metres (degenerate-case fallback only)
+    user_range      : [lo, hi] to force span/center, or falsy for auto
+    ratio           : element_height_xz / element_height_yz (fraction of span)
+    """
+    if user_range:
+        lo, hi = float(user_range[0]), float(user_range[1])
+        span   = abs(hi - lo)
+        center = (lo + hi) / 2.0
+    else:
+        if transverse_vals:
+            lo, hi = min(transverse_vals), max(transverse_vals)
+        else:
+            lo = hi = 0.0
+        data_span = hi - lo
+        center    = (lo + hi) / 2.0            # data mean — origin-independent
+        if data_span > 1e-2:
+            span = data_span * pad
+        else:
+            span = max(float(z_extent) * degenerate_frac, min_h)
+    height = max(span * ratio, min_h)
+    return height, center, span / 2.0
+
+def _lock_floor_aspect(fig, row, col=1):
+    """Constrain a floor-plan row's transverse (Y) axis to share the scale of
+    its longitudinal (X/Z) axis, so bend arcs render as true circles and X and Z
+    use one scale. No-op if the subplot cannot be resolved."""
+    try:
+        xref = fig.get_subplot(row, col).xaxis.plotly_name.replace('axis', '')
+        fig.update_yaxes(scaleanchor=xref, scaleratio=1.0, row=row, col=col)
+    except Exception:
+        pass
 def _load_one(input_file, code, log_fn=None, progress_fn=None,
               xsuite_twiss='4d', xsuite_line=None, universes=None,
               madx_survey=None):
@@ -254,17 +307,52 @@ def _inspect_available_data(input_file, code, log_fn=None,
     return result
 
 
+def _grid_position_cell_legends(fig, lkw, cr, cc, legend_keys, hide=False, mode='side', leg_font_size=None):
+    """Position one or more legend boxes for a grid cell at (cr, cc).
+
+    legend_keys can list keys that don't actually exist in the figure (e.g.
+    floor-xz only creates 2 legend keys per extra universe, but we pass a
+    generous superset) — any key not found in fig.layout is harmless to set
+    since plotly simply won't render it.
+    """
+    if hide:
+        for k in legend_keys:
+            lkw[k] = dict(visible=False, x=-2, y=-2)
+        return
+    try:
+        _sub = fig.get_subplot(cr, cc)
+        _xdom = _sub.xaxis.domain if _sub and _sub.xaxis.domain else [0.0, 1.0]
+        _ydom = _sub.yaxis.domain if _sub and _sub.yaxis.domain else [0.0, 1.0]
+    except Exception as _e:
+        _xdom, _ydom = [0.0, 1.0], [0.0, 1.0]
+    _y_top = _ydom[1]
+    _y_step = 0.05  # vertical offset between stacked legends in the same cell
+    for _i, k in enumerate(legend_keys):
+        _y = _y_top - _i * _y_step
+        if mode == 'inside':
+            lkw[k] = dict(x=_xdom[1] - 0.01, xanchor='right',
+                          y=_y - 0.01, yanchor='top',
+                          bgcolor='rgba(0,0,0,0)', font=dict(size=leg_font_size or 8))
+        else:  # 'side' and 'top'/'bottom' both fall back to just-outside-cell placement
+            lkw[k] = dict(x=_xdom[1] + 0.005, xanchor='left',
+                          y=_y, yanchor='top',
+                          bgcolor='rgba(0,0,0,0)', font=dict(size=leg_font_size or 8))
+
+
 def plot_optics(
     input_file, code='tao', output_file='optics.html',
     show_element_labels=True, show=False,
     save_png=False, save_pdf=False, dpi=300,
     save_csv=False, csv_base='lattice',
     flip_bend=False, element_height_xz=None, element_height_yz=None,
+    equal_aspect=False,
     fp_xz_range=None, fp_yz_range=None,
     panels=None, layout='panels', srange=None,
     emit_x=None, emit_y=None, sigma_dp=None, n_sigma=1.0,
     title=None, dark_mode=False, log_fn=None,
     aspect_ratio=None, legend_inside=True,
+    legend_mode='side',  # 'side'=outside right, 'inside'=inside plot, 'bottom'=horizontal row below, 'top'=horizontal row above
+    panels_meta=None,    # dict: panel_index -> {'hide_legend': bool} for per-panel legend control
     xsuite_twiss='4d', xsuite_line=None,
     universes=None,
     madx_survey=None,
@@ -294,6 +382,13 @@ def plot_optics(
     compare_mode='overlay',  # 'overlay', 'separate', 'difference', 'difference%'
     normalize_s=False,   # if True, plot s/s_max so all files share [0,1]
     elem_colors=None,    # dict mapping element type key to color, e.g. {'sbend': '#ff0000'}
+    grid_layout=None,    # dict: {'rows':R,'cols':C,'cells':[{'row':r,'col':c,'spec':...,'source':uid,'span_cols':n}]}
+    shared_xaxis=True,   # if True, link x-axes of all data panels (pan/zoom synced)
+    hide_labels=False,   # if True, suppress all axis title labels on the plot
+    bar_elem_ratio=0.5,  # fraction of bar y-axis span for element height (0.4*0.5=0.2 = original default)
+                         # When set, renders a grid instead of the vertical panels stack.
+                         # 'source': None=all selected universes, integer=specific universe uid
+                         # 'span_cols': int, number of columns this cell spans (for floor plans)
 ):
     """
     panels : list of panel types to include, in display order.
@@ -336,6 +431,9 @@ def plot_optics(
     # Normalise layout aliases: 'all' and 'optics' → 'panels'
     layout = layout.lower()
     if layout in ('all', 'optics'): layout = 'panels'
+    # Resolve legend mode early so data panel loop can reference _horiz
+    _lmode = legend_mode if legend_mode in ('side','inside','bottom','top') else ('inside' if legend_inside else 'side')
+    _horiz = _lmode in ('bottom', 'top')
     # Load tunnel wall coordinates if provided
     _tunnel = None
     if show_tunnel and tunnel_wall_file:
@@ -441,6 +539,7 @@ def plot_optics(
         panels = ['twiss']
 
     # ── Range filter ─────────────────────────────────────────────────────────
+    s_lo = s_hi = None  # set by srange block below; used later for floor plan filtering
     if srange:
         pts = srange.split(':')
         if len(pts) != 2:
@@ -505,25 +604,12 @@ def plot_optics(
         cxz_ratio  = element_height_xz if element_height_xz is not None else 0.05
         cyz_ratio  = element_height_yz if element_height_yz is not None else 0.05
         csign      = -1.0 if flip_bend else 1.0
-        if cuse_flr_y:
-            cy_data = ([csign * e.get('flr_y0', 0.0) for e in celems] +
-                       [csign * e.get('flr_y1', 0.0) for e in celems])
-            cy_min, cy_max = min(cy_data), max(cy_data)
-        else:
-            cy_min, cy_max = 0.0, 0.0
-        cy_data_span = cy_max - cy_min
+        _c_s_extent = max((e['s_start'] + e['length']) for e in celems) if celems else 1.0
         _cyz_rng_p = _parse_fp_range(fp_yz_range)
         _cxz_rng_p = _parse_fp_range(fp_xz_range)
-        if _cyz_rng_p:
-            cyz_half  = abs(_cyz_rng_p[1] - _cyz_rng_p[0]) / 2.0
-            cy_center = (_cyz_rng_p[0] + _cyz_rng_p[1]) / 2.0
-        elif cy_data_span < 0.01:
-            cs_max    = max((e['s_start'] + e['length']) for e in celems) if celems else 1.0
-            cyz_half  = cs_max * 0.02
-            cy_center = 0.0
-        else:
-            cyz_half  = (cy_data_span / 2.0) * 1.2
-            cy_center = (cy_min + cy_max) / 2.0
+        cy_data = ([csign * e.get('flr_y0', 0.0) for e in celems] +
+                   [csign * e.get('flr_y1', 0.0) for e in celems]) if cuse_flr_y else []
+        _cyz_h_own, cy_center, cyz_half = _floor_sizing(cy_data, _c_s_extent, _cyz_rng_p, cyz_ratio)
         # Reuse primary element heights for visual consistency across backends
         cxz_height = _primary_xz_height
         cyz_height = _primary_yz_height
@@ -532,10 +618,16 @@ def plot_optics(
                                                        cy_center + chalf_range]
         return cxz_height, cyz_height, _cxz_rng_p, cyz_range
 
+    # x_domain is refined per legend mode in the stacked-panels branch below;
+    # the floor branch never touches it but the shared epilogue applies it to
+    # every xaxis unconditionally, so it needs a default here too.
+    x_domain = [0.0, 0.95]
+
     # ═══════════════════════════════════════════════════════════════════════════
     # LAYOUT: floor — two floor plans only
     # ═══════════════════════════════════════════════════════════════════════════
-    if layout == 'floor':
+    def _render_floor_layout():
+        nonlocal _primary_xz_height, _primary_yz_height
         use_flr_y = any('flr_y0' in e for e in elements)
         if use_flr_y:
             y_vals = ([e.get('flr_y0', 0.0) for e in elements] +
@@ -552,44 +644,20 @@ def plot_optics(
         sign = -1.0 if flip_bend else 1.0
 
         # ── Y-Z axis span ─────────────────────────────────────────────────────
-        if use_flr_y:
-            y_data = ([sign * e.get('flr_y0', 0.0) for e in elements] +
-                      [sign * e.get('flr_y1', 0.0) for e in elements])
-            y_min_fp, y_max_fp = min(y_data), max(y_data)
-        else:
-            y_min_fp, y_max_fp = 0.0, 0.0
-        y_data_span = y_max_fp - y_min_fp
-
-        # Use user-specified range if provided, otherwise auto
         _yz_rng_parsed = _parse_fp_range(fp_yz_range)
         _xz_rng_parsed = _parse_fp_range(fp_xz_range)
+        _s_extent = max((e['s_start'] + e['length']) for e in elements) if elements else 1.0
 
-        if _yz_rng_parsed:
-            yz_axis_span = abs(_yz_rng_parsed[1] - _yz_rng_parsed[0])
-            yz_half = yz_axis_span / 2.0
-            y_center = (_yz_rng_parsed[0] + _yz_rng_parsed[1]) / 2.0
-        elif y_data_span < 0.01:
-            s_max = max((e['s_start'] + e['length']) for e in elements) if elements else 1.0
-            yz_half = s_max * 0.02
-            yz_axis_span = yz_half * 2.0
-            y_center = 0.0
-        else:
-            yz_half = (y_data_span / 2.0) * 1.2
-            yz_axis_span = yz_half * 2.0
-            y_center = (y_min_fp + y_max_fp) / 2.0
-        yz_height = max(yz_axis_span * yz_ratio, 0.001)
+        y_data = ([sign * e.get('flr_y0', 0.0) for e in elements] +
+                  [sign * e.get('flr_y1', 0.0) for e in elements]) if use_flr_y else []
+        yz_height, y_center, yz_half = _floor_sizing(y_data, _s_extent, _yz_rng_parsed, yz_ratio)
+        yz_axis_span = yz_half * 2.0
 
         # ── X-Z axis span ─────────────────────────────────────────────────────
-        if _xz_rng_parsed:
-            xz_axis_span = abs(_xz_rng_parsed[1] - _xz_rng_parsed[0])
-        elif use_flr_y:
-            x_vals = ([sign * e.get('flr_x0', 0.0) for e in elements] +
-                      [sign * e.get('flr_x1', 0.0) for e in elements])
-            x_data_span = max(x_vals) - min(x_vals) if x_vals else 0.0
-            xz_axis_span = x_data_span * 1.2 if x_data_span > 0.01 else yz_axis_span
-        else:
-            xz_axis_span = yz_axis_span
-        xz_height = max(xz_axis_span * xz_ratio, 0.001)
+        x_data = ([sign * e.get('flr_x0', 0.0) for e in elements] +
+                  [sign * e.get('flr_x1', 0.0) for e in elements]) if use_flr_y else []
+        xz_height, x_center, xz_half = _floor_sizing(x_data, _s_extent, _xz_rng_parsed, xz_ratio)
+        xz_axis_span = xz_half * 2.0
         _primary_xz_height = xz_height
         _primary_yz_height = yz_height
 
@@ -661,14 +729,26 @@ def plot_optics(
                 fig.update_xaxes(range=_tyz_z, row=_yz_row, col=1)
                 fig.update_yaxes(range=_yz_rng if _yz_rng else _tyz_y, row=_yz_row, col=1)
         else:
-            y_center = (y_min_fp + y_max_fp) / 2.0
             half_range = yz_half + yz_height
             if _yz_row is not None:
                 fig.update_yaxes(
                     range=_yz_rng if _yz_rng else [y_center - half_range, y_center + half_range],
                     row=_yz_row, col=1)
-            if _xz_row is not None and _xz_rng:
-                fig.update_yaxes(range=_xz_rng, row=_xz_row, col=1)
+            if _xz_row is not None:
+                if _xz_rng:
+                    fig.update_yaxes(range=_xz_rng, row=_xz_row, col=1)
+                elif use_flr_y:
+                    _xz_half_range = xz_half + xz_height
+                    fig.update_yaxes(
+                        range=[x_center - _xz_half_range, x_center + _xz_half_range],
+                        row=_xz_row, col=1)
+                # else: dead-reckoning (no survey coords) — leave XZ auto-ranged so
+                # the computed beampipe defines the horizontal extent
+
+        # ── Equal aspect (optional) ───────────────────────────────────────────
+        if equal_aspect:
+            if _xz_row is not None: _lock_floor_aspect(fig, _xz_row)
+            if _yz_row is not None: _lock_floor_aspect(fig, _yz_row)
 
         # ── Floor layout: separate compare figures ────────────────────────────
         if compare_mode == 'separate' and _cmp_datasets:
@@ -699,6 +779,8 @@ def plot_optics(
                 cfig.update_yaxes(title_text='X (m)', row=1, col=1,
                                   **({'range': cxz_rng} if cxz_rng else {}))
                 cfig.update_yaxes(title_text='Y (m)', row=2, col=1, range=cyz_rng)
+                if equal_aspect:
+                    _lock_floor_aspect(cfig, 1); _lock_floor_aspect(cfig, 2)
                 if not hasattr(fig, '_compare_figs'): fig._compare_figs = []
                 fig._compare_figs.append((clabel, cfig))
 
@@ -718,1025 +800,1501 @@ def plot_optics(
                                      legend_name=f'legend{(ci+1)*2}',
                                      fp_legend_name=f'legend{(ci+1)*2+1}',
                                      elem_colors=elem_colors)
+        return fig
+
+    if layout == 'floor':
+        fig = _render_floor_layout()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # LAYOUT: all / optics — dynamic panels
     # ═══════════════════════════════════════════════════════════════════════════
     else:
-        # ── Reorder panels: floor-xz/floor-yz first, bar last ─────────────────
-        _floor_panels = [p for p in panels if p in ('floor-xz', 'floor-yz')]
-        _data_panels  = [p for p in panels if p not in ('floor-xz', 'floor-yz', 'bar')]
-        _bar_panels   = [p for p in panels if p == 'bar']
-        panels_ordered = _floor_panels + _data_panels + _bar_panels
+        # ══════════════════════════════════════════════════════════════════════
+        # GRID LAYOUT — multi-column grid of panels with per-cell universe
+        # ══════════════════════════════════════════════════════════════════════
+        def _render_grid_layout():
+            _grid_rows  = int(grid_layout.get('rows', 1))
+            _grid_cols  = int(grid_layout.get('cols', 1))
+            _cells      = grid_layout.get('cells', [])
+            _row_heights_px = grid_layout.get('row_heights', [])
+            if not _row_heights_px:
+                _row_heights_px = [int(grid_layout.get('cell_height_px', 300))] * _grid_rows
+            while len(_row_heights_px) < _grid_rows:
+                _row_heights_px.append(300)
+            _spacing_px = max(20, int(float(panel_spacing))) if panel_spacing else 60
 
-        # Warn if user had floor panels out of order
-        if panels != panels_ordered and _floor_panels:
-            _log("[info] Floor plan panels moved to top automatically.")
+            # Build specs: scan cells for colspan and secondary_y needs
+            _grid_specs = [[{'secondary_y': False} for _ in range(_grid_cols)]
+                           for _ in range(_grid_rows)]
+            _grid_titles = [['' for _ in range(_grid_cols)] for _ in range(_grid_rows)]
+            _spanned = set()  # (r,c) cells occupied by a span
 
-        panels = panels_ordered
+            for cell in _cells:
+                cr = int(cell['row']) - 1  # 0-indexed
+                cc = int(cell['col']) - 1
+                spec = cell.get('spec', 'twiss')
+                span = int(cell.get('span_cols', 1))
+                has_sec = spec == 'twiss' or (
+                    isinstance(spec, dict) and (
+                        bool(spec.get('y2')) or
+                        (spec.get('type') == 'expr' and bool(spec.get('y2_expr', '').strip()))
+                    )
+                )
+                if 0 <= cr < _grid_rows and 0 <= cc < _grid_cols:
+                    _grid_specs[cr][cc] = {'secondary_y': has_sec, 'colspan': span} if span > 1 else {'secondary_y': has_sec}
+                    # Mark spanned cells as None
+                    for sc in range(cc + 1, cc + span):
+                        if sc < _grid_cols:
+                            _grid_specs[cr][sc] = None
+                            _spanned.add((cr, sc))
+                    # Title
+                    if show_titles:
+                        _grid_titles[cr][cc] = cell.get('name', panel_title(spec) if isinstance(spec, str) else spec.get('name', 'Custom'))
 
-        # ── Keep backward compat: show_floor still works if no floor panels ───
-        # If show_floor is True and no floor panels added, inject floor-xz
-        if show_floor and not _floor_panels:
-            panels = ['floor-xz'] + panels
-            _floor_panels = ['floor-xz']
+            # Flatten specs and titles for make_subplots
+            _flat_specs  = _grid_specs
+            _flat_titles = [_grid_titles[r][c] for r in range(_grid_rows) for c in range(_grid_cols)]
 
-        include_floor = bool(_floor_panels)
-        include_bar   = any(p == 'bar' for p in panels)
-        n_panels      = len(panels)
+            _total_h = sum(_row_heights_px) + max(0, _grid_rows - 1) * _spacing_px
+            _v_sp    = _spacing_px / _total_h if _total_h > 0 else 0.05
+            _row_heights_norm = [h / _total_h for h in _row_heights_px]
 
-        # ── Default panel heights (px) ─────────────────────────────────────────
-        _DEFAULT_H = {
-            'floor-xz': 220, 'floor-yz': 220,
-            'bar': 80,
-            'latdiff': 260,  # per table × 3
-            'summary': 260,
-        }
-        _DATA_H = 280  # default for data panels
+            fig = make_subplots(
+                rows=_grid_rows, cols=_grid_cols,
+                shared_xaxes=False,
+                vertical_spacing=_v_sp,
+                horizontal_spacing=0.08,
+                row_heights=_row_heights_norm,
+                subplot_titles=_flat_titles if show_titles else [''] * len(_flat_titles),
+                specs=_flat_specs,
+            )
+            fig.update_layout(height=max(_total_h, 300), hovermode='closest')
 
-        def _panel_px(p, idx):
-            if isinstance(p, str):
-                key = p
-            else:
-                key = p.get('_id', p.get('type', 'custom'))
-            if panel_heights and key in panel_heights:
-                return int(panel_heights[key])
-            if isinstance(p, str):
-                return _DEFAULT_H.get(p, _DATA_H)
-            return _DATA_H
+            # ── Render each cell ──────────────────────────────────────────────
+            _grid_first_s_ref = None  # x-axis ref of first data cell (for linking)
+            lkw = {}  # accumulates per-cell legend positions, applied after the loop
+            # Drop shared x-axis if any cell has a custom srange
+            _any_cell_srange = any(c.get('cell_srange', '').strip() for c in _cells)
+            _grid_shared_x = shared_xaxis and not _any_cell_srange
 
-        # ── Build row list with heights ────────────────────────────────────────
-        # latdiff = 3 rows, others = 1
-        row_list = []  # list of (panel, row_height_px)
-        for idx, p in enumerate(panels):
-            h = _panel_px(p, idx)
-            if p == 'latdiff':
-                row_list.extend([(p, h), (p, h), (p, h)])
-            else:
-                row_list.append((p, h))
+            for cell in _cells:
+                cr = int(cell['row'])   # 1-indexed for plotly
+                cc = int(cell['col'])   # 1-indexed for plotly
+                if (cr - 1, cc - 1) in _spanned:
+                    continue  # skip cells that are covered by a span
+                spec    = cell.get('spec', 'twiss')
+                source  = cell.get('source', None)  # universe uid or None
+                span    = int(cell.get('span_cols', 1))
+                _cell_name = cell.get('name', panel_title(spec) if isinstance(spec, str) else spec.get('name','Custom'))
 
-        n_rows  = len(row_list)
-        # Panel spacing in pixels — adds to total height, doesn't steal from panels
-        _spacing_px = max(20, int(float(panel_spacing))) if panel_spacing else 80
-        total_h = sum(r[1] for r in row_list) + max(0, (n_rows - 1)) * _spacing_px
-
-        # Normalized row heights: panel px / total_h (spacing handled by v_spacing)
-        v_spacing = _spacing_px / total_h if total_h > 0 else 0.08
-        row_heights_norm = [r[1] / total_h for r in row_list]
-
-        # ── Subplot titles and specs ───────────────────────────────────────────
-        titles, specs = [], []
-        for p, _ in row_list:
-            if p == 'latdiff' and row_list.index((p, _)) == next(
-                    i for i,(rp,_) in enumerate(row_list) if rp == 'latdiff'):
-                titles.append(panel_title(p))
-                specs.append([{'type': 'table'}])
-            elif p == 'latdiff':
-                # 2nd and 3rd rows of latdiff
-                titles.append('')
-                specs.append([{'type': 'table'}])
-            elif p in ('floor-xz', 'floor-yz', 'bar'):
-                titles.append(panel_title(p))
-                specs.append([{'secondary_y': False}])
-            elif p == 'summary':
-                titles.append(panel_title(p))
-                specs.append([{'type': 'table'}])
-            else:
-                titles.append(p.get('name', 'Custom') if isinstance(p, dict) else panel_title(p))
-                specs.append([{'secondary_y': (p == 'twiss') or
-                    (isinstance(p, dict) and bool(p.get('y2'))) or
-                    (isinstance(p, dict) and p.get('type') == 'expr' and
-                     bool(p.get('y2_expr', '').strip()))}])
-
-        fig = make_subplots(
-            rows=n_rows, cols=1, shared_xaxes=False,
-            row_heights=row_heights_norm, vertical_spacing=v_spacing,
-            subplot_titles=titles if show_titles else [''] * len(titles), specs=specs,
-        )
-        fig.update_layout(height=max(total_h, 400))
-
-        current_row = 1
-
-        # ── Floor plan rows ────────────────────────────────────────────────────
-        _primary_xz_height = 0.05
-        _primary_yz_height = 0.05
-
-        _floor_panel_idx = 0  # track which floor panel we're building for legend keys
-        if 'floor-xz' in panels:
-            _prog(50, 'Building floor plan (X-Z)...')
-            sign = -1.0 if flip_bend else 1.0
-            _xz_ratio = element_height_xz if element_height_xz is not None else 0.05
-            use_flr_y = any('flr_y0' in e for e in elements)
-            if use_flr_y:
-                x_vals = ([sign * e.get('flr_x0', 0.0) for e in elements] +
-                          [sign * e.get('flr_x1', 0.0) for e in elements])
-                x_data_span = max(x_vals) - min(x_vals) if x_vals else 1.0
-                xz_axis_span = x_data_span * 1.2 if x_data_span > 0.01 else 1.0
-                _xz_h = max(xz_axis_span * _xz_ratio, 0.001)
-            else:
-                _xz_rng_val = _parse_fp_range(fp_xz_range)
-                if _xz_rng_val:
-                    _xz_h = (_xz_rng_val[1] - _xz_rng_val[0]) * _xz_ratio
+                # Resolve which universes to use for this cell
+                if source is not None:
+                    # Single specific universe
+                    _cell_unis = [source] if source in _all_uni_data else _plot_unis[:1]
+                    _cell_multi = False
                 else:
-                    _xz_h = 1.0 * _xz_ratio
-                _xz_h = max(_xz_h, 0.001)
-            _primary_xz_height = _xz_h
-            _xz_floor_row = current_row
-            for _ui, _uid in enumerate(_plot_unis):
-                _ud = _all_uni_data[_uid]
-                _uelems = _ud['elements']
-                _base = 1000 + _floor_panel_idx * 10
-                _fp_leg = f'legend{_base + 1}' if _ui == 0 else f'legend{_base + _ui * 2 + 1}'
-                _el_leg = f'legend{_base}'     if _ui == 0 else f'legend{_base + _ui * 2}'
-                _build_floor_plan(fig, _uelems, _xz_h, flip_bend,
-                                  row=current_row,
-                                  legend_name=_el_leg, fp_legend_name=_fp_leg,
-                                  show_fp_legend=(_ui == 0),
-                                  beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
-                                  show_markers=show_markers, elem_colors=elem_colors)
-            fig.update_xaxes(title_text='Z (m)', row=current_row, col=1)
-            _xz_rng = _parse_fp_range(fp_xz_range)
-            if _tunnel is not None:
-                _, _txz_x = _draw_tunnel_wall_xz(fig, _tunnel, row=current_row, flip=flip_bend)
-                fig.update_yaxes(title_text='X (m)', row=current_row, col=1,
-                                 range=_xz_rng if _xz_rng else _txz_x)
-            else:
-                fig.update_yaxes(title_text='X (m)', row=current_row, col=1,
-                                 **({'range': _xz_rng} if _xz_rng else {}))
-            current_row += 1
-            _floor_panel_idx += 1
+                    _cell_unis = _plot_unis
+                    _cell_multi = _multi
 
-        # Handle each floor-yz panel separately (user may add multiple with different halves)
-        _yz_panel_list = [p for p in panels if p == 'floor-yz']
-        if _yz_panel_list:
-            _prog(52, 'Building floor plan (Y-Z)...')
-            _yz_ratio = element_height_yz if element_height_yz is not None else 0.05
-            use_flr_y2 = any('flr_y0' in e for e in elements)
-            if use_flr_y2:
-                y_vals = [e.get('flr_y0', 0.0) for e in elements] + [e.get('flr_y1', 0.0) for e in elements]
-                y_data_span = max(y_vals) - min(y_vals) if y_vals else 0.0
-                y_min_fp = min(y_vals) if y_vals else 0.0
-                y_max_fp = max(y_vals) if y_vals else 0.0
-                y_center = (y_min_fp + y_max_fp) / 2.0
-                _yz_rng_val = _parse_fp_range(fp_yz_range)
-                if _yz_rng_val:
-                    yz_display_span = _yz_rng_val[1] - _yz_rng_val[0]
-                elif y_data_span > 0.01:
-                    yz_display_span = y_data_span * 1.4
+                _cell_ud   = _all_uni_data[_cell_unis[0]]
+                _cell_s    = _cell_ud['s']
+                _cell_ba   = _cell_ud['beta_a']
+                _cell_bb   = _cell_ud['beta_b']
+                _cell_ex   = _cell_ud['eta_x']
+                _cell_ey   = _cell_ud['eta_y']
+                _cell_ox   = _cell_ud['orbit_x']
+                _cell_oy   = _cell_ud['orbit_y']
+                _cell_pa   = _cell_ud['phi_a']
+                _cell_pb   = _cell_ud['phi_b']
+                _cell_al_a = _cell_ud.get('alpha_a', np.zeros_like(_cell_s))
+                _cell_al_b = _cell_ud.get('alpha_b', np.zeros_like(_cell_s))
+                _cell_bp   = {**beam_params, 'alpha_a': _cell_al_a, 'alpha_b': _cell_al_b}
+                _cell_elems = _cell_ud['elements']
+                _cell_lbl   = _uni_labels.get(_cell_unis[0], f'u{_cell_unis[0]}')
+                _cell_leg   = f'legend{100 + cr * 10 + cc}'
+                _cell_names = _make_elem_name_array(_cell_s, _cell_elems) if bar_lite else None
+
+                # ── Per-cell srange filter ─────────────────────────────────────
+                _cell_srange = cell.get('cell_srange', '').strip()
+                _c_lo = _c_hi = None  # safe defaults for floor plan code below
+                if _cell_srange:
+                    try:
+                        _cpts = _cell_srange.split(':')
+                        def _cres(tok, _s=_cell_s, _elems=_cell_elems):
+                            try: return float(tok)
+                            except ValueError:
+                                tu = tok.strip().upper()
+                                for e in _elems:
+                                    if e['name'].upper() == tu: return e['s_start']
+                                raise ValueError(f"Element '{tok}' not found")
+                        _c_lo = _cres(_cpts[0].strip()); _c_hi = _cres(_cpts[1].strip())
+                        if _c_lo > _c_hi: _c_lo, _c_hi = _c_hi, _c_lo
+                        _cmask = (_cell_s >= _c_lo) & (_cell_s <= _c_hi)
+                        _cell_s    = _cell_s[_cmask]
+                        _cell_ba   = _cell_ba[_cmask]; _cell_bb = _cell_bb[_cmask]
+                        _cell_ex   = _cell_ex[_cmask]; _cell_ey = _cell_ey[_cmask]
+                        _cell_ox   = _cell_ox[_cmask]; _cell_oy = _cell_oy[_cmask]
+                        _cell_pa   = _cell_pa[_cmask]; _cell_pb = _cell_pb[_cmask]
+                        _cell_al_a = _cell_al_a[_cmask]; _cell_al_b = _cell_al_b[_cmask]
+                        _cell_bp   = {**beam_params, 'alpha_a': _cell_al_a, 'alpha_b': _cell_al_b}
+                        _cell_elems = [e for e in _cell_elems
+                                       if (e['s_start'] + e['length']) >= _c_lo and e['s_start'] <= _c_hi]
+                        _cell_names = _make_elem_name_array(_cell_s, _cell_elems) if bar_lite else None
+                    except Exception as _ce:
+                        _log(f'[warn] cell srange error: {_ce}')
+
+                # ── Floor plan cells — use identical logic to working panels path ──
+                if spec == 'floor-xz':
+                    sign = -1.0 if flip_bend else 1.0
+                    _xz_ratio = element_height_xz if element_height_xz is not None else 0.05
+                    use_flr_y = any('flr_y0' in e for e in _cell_elems)
+                    _cs_ext = max((e['s_start'] + e['length']) for e in _cell_elems) if _cell_elems else 1.0
+                    _x_vals = ([sign * e.get('flr_x0', 0.0) for e in _cell_elems] +
+                               [sign * e.get('flr_x1', 0.0) for e in _cell_elems]) if use_flr_y else []
+                    _xz_h, _, _ = _floor_sizing(_x_vals, _cs_ext,
+                                                _parse_fp_range(fp_xz_range), _xz_ratio)
+                    _gfp_base = 2000 + (cr * 10 + cc) * 10
+                    _fp_c_lo = _c_lo  # None if no srange or parse failed
+                    _fp_c_hi = _c_hi
+                    for _gui, _guid in enumerate(_cell_unis):
+                        _raw_elems = _all_uni_data[_guid]['elements']
+                        _guelems = [e for e in _raw_elems
+                                    if _fp_c_lo is None or
+                                    ((e['s_start'] + e['length']) >= _fp_c_lo and e['s_start'] <= _fp_c_hi)
+                                    ] if _fp_c_lo is not None else _raw_elems
+                        _gfp = f'legend{_gfp_base+1}' if _gui == 0 else f'legend{_gfp_base+_gui*2+1}'
+                        _gel = f'legend{_gfp_base}'   if _gui == 0 else f'legend{_gfp_base+_gui*2}'
+                        _build_floor_plan(fig, _guelems, _xz_h, flip_bend,
+                                          row=cr, col=cc,
+                                          legend_name=_gel, fp_legend_name=_gfp,
+                                          show_fp_legend=(_gui == 0),
+                                          beampipe_color=_BEAMPIPE_COLORS[_gui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
+                                          show_markers=show_markers, elem_colors=elem_colors)
+                    fig.update_xaxes(title_text='Z (m)', row=cr, col=cc)
+                    _xz_rng = _parse_fp_range(fp_xz_range)
+                    fig.update_yaxes(title_text='X (m)', row=cr, col=cc,
+                                     **({'range': _xz_rng} if _xz_rng else {}))
+                    if equal_aspect: _lock_floor_aspect(fig, cr, cc)
+                    _grid_position_cell_legends(fig, lkw, cr, cc,
+                                                [f'legend{_gfp_base}', f'legend{_gfp_base+1}']
+                                                + [f'legend{_gfp_base+1+_k*2}' for _k in range(1, len(_cell_unis))]
+                                                + [f'legend{_gfp_base+_k*2}' for _k in range(1, len(_cell_unis))],
+                                                hide=bool(cell.get('hide_legend', False)), mode=_lmode,
+                                                leg_font_size=(font_sizes or {}).get('legend'))
+                    continue
+
+                if spec == 'floor-yz':
+                    _yz_ratio = element_height_yz if element_height_yz is not None else 0.05
+                    use_flr_y2 = any('flr_y0' in e for e in _cell_elems)
+                    _cs_ext2 = max((e['s_start'] + e['length']) for e in _cell_elems) if _cell_elems else 1.0
+                    _y_vals = ([e.get('flr_y0', 0.0) for e in _cell_elems] +
+                               [e.get('flr_y1', 0.0) for e in _cell_elems]) if use_flr_y2 else []
+                    _yz_h, y_center, yz_half = _floor_sizing(_y_vals, _cs_ext2,
+                                                _parse_fp_range(fp_yz_range), _yz_ratio)
+                    _this_half = cell.get('yz_ring_half', yz_ring_half)
+                    _gfp_base = 2000 + (cr * 10 + cc) * 10
+                    _fp_c_lo = _c_lo  # None if no srange or parse failed
+                    _fp_c_hi = _c_hi
+                    for _gui, _guid in enumerate(_cell_unis):
+                        _raw_elems = _all_uni_data[_guid]['elements']
+                        _guelems = [e for e in _raw_elems
+                                    if _fp_c_lo is None or
+                                    ((e['s_start'] + e['length']) >= _fp_c_lo and e['s_start'] <= _fp_c_hi)
+                                    ] if _fp_c_lo is not None else _raw_elems
+                        _gfp = f'legend{_gfp_base+1}' if _gui == 0 else f'legend{_gfp_base+_gui*2+1}'
+                        _gel = f'legend{_gfp_base}'   if _gui == 0 else f'legend{_gfp_base+_gui*2}'
+                        _build_floor_plan_yz(fig, _guelems, _yz_h, flip_bend, yz_half=_this_half,
+                                              row=cr, col=cc,
+                                              legend_name=_gel, fp_legend_name=_gfp,
+                                              show_fp_legend=(_gui == 0),
+                                              beampipe_color=_BEAMPIPE_COLORS[_gui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
+                                              show_markers=show_markers, elem_colors=elem_colors)
+                    fig.update_xaxes(title_text='Z (m)', row=cr, col=cc)
+                    _yz_rng = _parse_fp_range(fp_yz_range)
+                    fig.update_yaxes(title_text='Y (m)', row=cr, col=cc,
+                                     range=_yz_rng if _yz_rng else [y_center-yz_half-_yz_h, y_center+yz_half+_yz_h])
+                    if equal_aspect: _lock_floor_aspect(fig, cr, cc)
+                    _grid_position_cell_legends(fig, lkw, cr, cc,
+                                                [f'legend{_gfp_base}', f'legend{_gfp_base+1}']
+                                                + [f'legend{_gfp_base+1+_k*2}' for _k in range(1, len(_cell_unis))]
+                                                + [f'legend{_gfp_base+_k*2}' for _k in range(1, len(_cell_unis))],
+                                                hide=bool(cell.get('hide_legend', False)), mode=_lmode,
+                                                leg_font_size=(font_sizes or {}).get('legend'))
+                    continue
+
+                # ── Bar cell ───────────────────────────────────────────────────
+                if spec == 'bar':
+                    _build_layout_bar(fig, _cell_elems, show_element_labels, row=cr, col=cc,
+                                      show_markers=show_markers_bar, bar_lite=bar_lite,
+                                      elem_colors=elem_colors, elem_ratio=bar_elem_ratio)
+                    fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max', row=cr, col=cc)
+                    fig.update_yaxes(title_text='', showticklabels=False,
+                                     range=[-0.4, 0.4], fixedrange=True, row=cr, col=cc)
+                    continue
+
+                # ── Data cells (twiss, orbit, phase, beamsize, expr, custom) ───
+                has_secondary = spec == 'twiss' or (
+                    isinstance(spec, dict) and (
+                        bool(spec.get('y2')) or
+                        (spec.get('type') == 'expr' and bool(spec.get('y2_expr', '').strip()))
+                    )
+                )
+
+                if isinstance(spec, dict) and spec.get('type') == 'expr':
+                    if _cell_multi:
+                        for _gui, _guid in enumerate(_cell_unis):
+                            _gulbl = _uni_labels.get(_guid, f'u{_guid}')
+                            _gud   = _all_uni_data[_guid]
+                            _gpal  = _UNI_PALETTES[_gui % len(_UNI_PALETTES)]
+                            _p_tagged = dict(spec)
+                            _p_tagged['y1_label'] = f"{spec.get('y1_label', spec.get('y1_expr',''))} ({_gulbl})"
+                            if spec.get('y2_expr', '').strip():
+                                _p_tagged['y2_label'] = f"{spec.get('y2_label', spec.get('y2_expr',''))} ({_gulbl})"
+                            _build_expr_panel(fig, _p_tagged, _gud, code, _gud['s'],
+                                              row=cr, col=cc, legend_name=_cell_leg,
+                                              log_fn=log_fn, uni_idx=_guid, palette=_gpal)
+                    else:
+                        result = _build_expr_panel(fig, spec, _cell_ud, code, _cell_s,
+                                                   row=cr, col=cc, legend_name=_cell_leg,
+                                                   log_fn=log_fn, uni_idx=_cell_unis[0])
+                    y1_lbl = spec.get('y1_label', spec.get('y1_expr', ''))
+                    y2_lbl = spec.get('y2_label', spec.get('y2_expr', '')) or None
+                elif _cell_multi:
+                    for _gui, _guid in enumerate(_cell_unis):
+                        _gulbl = _uni_labels.get(_guid, f'u{_guid}')
+                        _gud   = _all_uni_data[_guid]
+                        _gpal  = _UNI_PALETTES[_gui % len(_UNI_PALETTES)]
+                        _gus   = _gud['s']; _guba = _gud['beta_a']; _gubb = _gud['beta_b']
+                        _guex  = _gud['eta_x']; _guey = _gud['eta_y']
+                        _guox  = _gud['orbit_x']; _guoy = _gud['orbit_y']
+                        _gupa  = _gud['phi_a']; _gupb = _gud['phi_b']
+                        _gual_a = _gud.get('alpha_a', np.zeros_like(_gus))
+                        _gual_b = _gud.get('alpha_b', np.zeros_like(_gus))
+                        _gubp  = {**beam_params, 'alpha_a': _gual_a, 'alpha_b': _gual_b}
+                        _build_panel3_uni(fig, spec,
+                            _gus, _guba, _gubb, _guex, _guey,
+                            _guox, _guoy, _gupa, _gupb,
+                            _gual_a, _gual_b, _gubp,
+                            row=cr, col=cc, legend_name=_cell_leg,
+                            uni_label=_gulbl, palette=_gpal,
+                            uni_idx=_gui, elem_names=_cell_names)
+                    y1_lbl = _ytitle_l.get(spec, '')
+                    y2_lbl = _ytitle_r.get(spec, '') if spec == 'twiss' else None
                 else:
-                    yz_display_span = max(_primary_xz_height * 20, 0.002)
-                yz_half = yz_display_span / 2.0
-            else:
-                _yz_rng_val = _parse_fp_range(fp_yz_range)
-                yz_display_span = (_yz_rng_val[1] - _yz_rng_val[0]) if _yz_rng_val else max(_primary_xz_height * 20, 1.0)
-                y_center = 0.0; yz_half = yz_display_span / 2.0
-            _yz_h = max(yz_display_span * _yz_ratio, 0.001)
-            _primary_yz_height = _yz_h
+                    result = _build_panel3(fig, spec, _cell_s, _cell_ba, _cell_bb,
+                                           _cell_ex, _cell_ey, _cell_ox, _cell_oy,
+                                           _cell_pa, _cell_pb,
+                                           row=cr, col=cc, legend_name=_cell_leg,
+                                           row3_secondary=has_secondary,
+                                           beam_params=_cell_bp, elem_names=_cell_names)
+                    if isinstance(spec, dict):
+                        y1_lbl = result[0] if result else ''
+                        y2_lbl = result[1] if result else None
+                    else:
+                        y1_lbl = _ytitle_l.get(spec, '')
+                        y2_lbl = _ytitle_r.get(spec, '') if spec == 'twiss' else None
 
-            # Get yz_ring_half per panel occurrence from the panels metadata
-            _yz_ring_halves = [_p_meta.get('yz_ring_half', yz_ring_half)
-                               for _p_meta in (panel_metadata or [])
-                               if _p_meta.get('spec') == 'floor-yz'] if panel_metadata else []
-            # Pad with default if fewer metadata entries than panels
-            while len(_yz_ring_halves) < len(_yz_panel_list):
-                _yz_ring_halves.append(yz_ring_half)
+                fig.update_yaxes(title_text=y1_lbl, row=cr, col=cc, secondary_y=False)
+                if has_secondary:
+                    fig.update_yaxes(title_text=y2_lbl or '', row=cr, col=cc, secondary_y=True)
 
-            for _yz_idx in range(len(_yz_panel_list)):
-                _this_half = _yz_ring_halves[_yz_idx]
-                for _ui, _uid in enumerate(_plot_unis):
+                # Link x-axes of data cells together (if shared_xaxis enabled and no per-cell srange)
+                if _grid_shared_x:
+                    if _grid_first_s_ref is None:
+                        # Capture the actual axis key assigned by plotly for this cell
+                        _ax_key = fig.get_subplot(cr, cc)
+                        _xaxis_name = _ax_key.xaxis.plotly_name if _ax_key else 'xaxis'
+                        # Convert 'xaxis' -> 'x', 'xaxis2' -> 'x2', etc.
+                        _grid_first_s_ref = _xaxis_name.replace('xaxis', 'x').replace('xx', 'x')
+                        if _grid_first_s_ref == 'x1': _grid_first_s_ref = 'x'
+                    else:
+                        fig.update_xaxes(matches=_grid_first_s_ref, row=cr, col=cc)
+
+                # s-axis label — only on bottom row of each column when shared_xaxis is on
+                _is_bottom_row = not any(
+                    c2.get('spec') not in ('floor-xz','floor-yz') and
+                    int(c2['row']) > cr and int(c2['col']) == cc
+                    for c2 in _cells
+                )
+                if not _grid_shared_x or _is_bottom_row:
+                    fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max', row=cr, col=cc)
+
+                # Annotations
+                _ann = cell.get('annot_pattern', '').strip()
+                if _ann:
+                    _build_panel_annotations(fig, _cell_elems, _ann, row=cr, col=cc,
+                                             annot_font_size=int((font_sizes or {}).get('annot', 8)))
+
+                # ── Legend positioning for this cell ───────────────────────────
+                # Each cell got a unique legend key (_cell_leg) when its traces
+                # were built. Without an explicit position, plotly stacks every
+                # legend at the same default spot — anchor it to this cell's
+                # own domain instead.
+                _grid_position_cell_legends(fig, lkw, cr, cc, [_cell_leg],
+                                            hide=bool(cell.get('hide_legend', False)), mode=_lmode)
+
+            fig.update_layout(**lkw)
+
+            # Apply theme and save
+            if hide_labels:
+                fig.update_xaxes(title_text='')
+                fig.update_yaxes(title_text='')
+            _apply(fig)
+            # Apply font sizes in grid mode
+            if font_sizes:
+                _fs = font_sizes
+                _ax_lbl = _fs.get('axis_label')
+                _tk_sz  = _fs.get('tick')
+                _ttl_sz = _fs.get('title')
+                _lg_sz  = _fs.get('legend')
+                if _ax_lbl:
+                    fig.update_xaxes(title_font=dict(size=_ax_lbl))
+                    fig.update_yaxes(title_font=dict(size=_ax_lbl))
+                if _tk_sz:
+                    fig.update_xaxes(tickfont=dict(size=_tk_sz))
+                    fig.update_yaxes(tickfont=dict(size=_tk_sz))
+                if _ttl_sz and show_titles:
+                    fig.update_layout(annotations=[dict(a, font=dict(size=_ttl_sz))
+                        if a.get('xref','') == 'paper' else a
+                        for a in fig.to_dict().get('layout',{}).get('annotations',[])])
+                if _lg_sz:
+                    _lu = {_lk: dict(font=dict(size=_lg_sz)) for _lk in fig.layout if str(_lk).startswith('legend')}
+                    if _lu: fig.update_layout(**_lu)
+            fig.write_html(output_file)
+            _prog(100, 'Done ✓')
+            _log(f'✓ Saved HTML → {output_file}')
+            if show:
+                import tempfile, webbrowser
+                with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as _tf:
+                    fig.write_html(_tf.name)
+                    webbrowser.open(_tf.name)
+            return
+        if grid_layout:
+            return _render_grid_layout()
+
+
+        def _render_panels_stack():
+            nonlocal _primary_xz_height, _primary_yz_height, panels, x_domain
+            # ── Reorder panels: floor-xz/floor-yz first, bar last ─────────────────
+            _floor_panels = [p for p in panels if p in ('floor-xz', 'floor-yz')]
+            _data_panels  = [p for p in panels if p not in ('floor-xz', 'floor-yz', 'bar')]
+            _bar_panels   = [p for p in panels if p == 'bar']
+            panels_ordered = _floor_panels + _data_panels + _bar_panels
+
+            # Warn if user had floor panels out of order
+            if panels != panels_ordered and _floor_panels:
+                _log("[info] Floor plan panels moved to top automatically.")
+
+            panels = panels_ordered
+
+            # ── Keep backward compat: show_floor still works if no floor panels ───
+            # If show_floor is True and no floor panels added, inject floor-xz
+            if show_floor and not _floor_panels:
+                panels = ['floor-xz'] + panels
+                _floor_panels = ['floor-xz']
+
+            include_floor = bool(_floor_panels)
+            include_bar   = any(p == 'bar' for p in panels)
+            n_panels      = len(panels)
+
+            # ── Default panel heights (px) ─────────────────────────────────────────
+            _DEFAULT_H = {
+                'floor-xz': 220, 'floor-yz': 220,
+                'bar': 80,
+                'latdiff': 260,  # per table × 3
+                'summary': 260,
+            }
+            _DATA_H = 280  # default for data panels
+
+            def _panel_px(p, idx):
+                if isinstance(p, str):
+                    key = p
+                else:
+                    key = p.get('_id', p.get('type', 'custom'))
+                if panel_heights and key in panel_heights:
+                    return int(panel_heights[key])
+                if isinstance(p, str):
+                    return _DEFAULT_H.get(p, _DATA_H)
+                return _DATA_H
+
+            # ── Build row list with heights ────────────────────────────────────────
+            # latdiff = 3 rows, others = 1
+            row_list = []  # list of (panel, row_height_px)
+            for idx, p in enumerate(panels):
+                h = _panel_px(p, idx)
+                if p == 'latdiff':
+                    row_list.extend([(p, h), (p, h), (p, h)])
+                else:
+                    row_list.append((p, h))
+
+            n_rows  = len(row_list)
+            # Panel spacing in pixels — adds to total height, doesn't steal from panels
+            _spacing_px = max(20, int(float(panel_spacing))) if panel_spacing else 80
+            total_h = sum(r[1] for r in row_list) + max(0, (n_rows - 1)) * _spacing_px
+
+            # Normalized row heights: panel px / total_h (spacing handled by v_spacing)
+            v_spacing = _spacing_px / total_h if total_h > 0 else 0.08
+            row_heights_norm = [r[1] / total_h for r in row_list]
+
+            # ── Subplot titles and specs ───────────────────────────────────────────
+            titles, specs = [], []
+            _latdiff_i = 0
+            for p, _ in row_list:
+                if p == 'latdiff':
+                    # Each latdiff panel expands to 3 consecutive rows — only
+                    # title the first; leave rows 2-3 blank.
+                    titles.append(panel_title(p) if _latdiff_i % 3 == 0 else '')
+                    specs.append([{'type': 'table'}])
+                    _latdiff_i += 1
+                elif p in ('floor-xz', 'floor-yz', 'bar'):
+                    titles.append(panel_title(p))
+                    specs.append([{'secondary_y': False}])
+                elif p == 'summary':
+                    titles.append(panel_title(p))
+                    specs.append([{'type': 'table'}])
+                else:
+                    titles.append(p.get('name', 'Custom') if isinstance(p, dict) else panel_title(p))
+                    specs.append([{'secondary_y': (p == 'twiss') or
+                        (isinstance(p, dict) and bool(p.get('y2'))) or
+                        (isinstance(p, dict) and p.get('type') == 'expr' and
+                         bool(p.get('y2_expr', '').strip()))}])
+
+            fig = make_subplots(
+                rows=n_rows, cols=1, shared_xaxes=False,
+                row_heights=row_heights_norm, vertical_spacing=v_spacing,
+                subplot_titles=titles if show_titles else [''] * len(titles), specs=specs,
+            )
+            fig.update_layout(height=max(total_h, 400))
+            current_row = 1
+
+            # ── Floor plan rows ────────────────────────────────────────────────────
+            _primary_xz_height = 0.05
+            _primary_yz_height = 0.05
+
+            _floor_panel_idx = 0  # track which floor panel we're building for legend keys
+            # Per-panel hide_legend lookup for floor panels (which lose their original
+            # index after being reordered to the top of the panels list).
+            def _panel_hide_legend(spec_str, occurrence=0):
+                """Find hide_legend flag for the Nth occurrence of spec_str in panel_metadata."""
+                if not panel_metadata:
+                    return False
+                _matches = [pm for pm in panel_metadata if pm.get('spec') == spec_str]
+                if occurrence < len(_matches):
+                    return bool(_matches[occurrence].get('hide_legend', False))
+                return False
+
+            _fxz_occ = 0  # occurrence counter for multiple floor-xz panels
+            for _ in [p for p in panels if p == 'floor-xz']:
+                _prog(50, 'Building floor plan (X-Z)...')
+                _fxz_hide_legend = _panel_hide_legend('floor-xz', _fxz_occ)
+                # Per-panel universe source for this floor-xz occurrence
+                _fxz_matches = [pm for pm in (panel_metadata or []) if pm.get('spec') == 'floor-xz']
+                _fxz_src = _fxz_matches[_fxz_occ].get('panel_source') if _fxz_occ < len(_fxz_matches) else None
+                _fxz_unis = [_fxz_src] if _fxz_src is not None and _fxz_src in _all_uni_data else _plot_unis
+                _fxz_occ += 1
+                sign = -1.0 if flip_bend else 1.0
+                _xz_ratio = element_height_xz if element_height_xz is not None else 0.05
+                use_flr_y = any('flr_y0' in e for e in elements)
+                _s_ext = max((e['s_start'] + e['length']) for e in elements) if elements else 1.0
+                _x_vals = ([sign * e.get('flr_x0', 0.0) for e in elements] +
+                           [sign * e.get('flr_x1', 0.0) for e in elements]) if use_flr_y else []
+                _xz_h, _x_center, _xz_half = _floor_sizing(_x_vals, _s_ext,
+                                            _parse_fp_range(fp_xz_range), _xz_ratio)
+                _primary_xz_height = _xz_h
+                _xz_floor_row = current_row
+                for _ui, _uid in enumerate(_fxz_unis):
                     _ud = _all_uni_data[_uid]
                     _uelems = _ud['elements']
+                    # Filter elements to plotted s-range so legend only shows
+                    # types actually in the plot region
+                    if s_lo is not None:
+                        _uelems = [e for e in _uelems
+                                   if (e['s_start'] + e['length']) >= s_lo and e['s_start'] <= s_hi]
                     _base = 1000 + _floor_panel_idx * 10
                     _fp_leg = f'legend{_base + 1}' if _ui == 0 else f'legend{_base + _ui * 2 + 1}'
                     _el_leg = f'legend{_base}'     if _ui == 0 else f'legend{_base + _ui * 2}'
-                    _build_floor_plan_yz(fig, _uelems, _yz_h, flip_bend, yz_half=_this_half,
-                                         row=current_row,
-                                         legend_name=_el_leg, fp_legend_name=_fp_leg,
-                                         show_fp_legend=(_ui == 0 and 'floor-xz' not in panels and _yz_idx == 0),
-                                         beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
-                                         show_markers=show_markers, elem_colors=elem_colors)
+                    _build_floor_plan(fig, _uelems, _xz_h, flip_bend,
+                                      row=current_row,
+                                      legend_name=_el_leg, fp_legend_name=_fp_leg,
+                                      show_fp_legend=(_ui == 0 and not _fxz_hide_legend),
+                                      beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
+                                      show_markers=show_markers, elem_colors=elem_colors)
                 fig.update_xaxes(title_text='Z (m)', row=current_row, col=1)
-                _yz_rng = _parse_fp_range(fp_yz_range)
+                _xz_rng = _parse_fp_range(fp_xz_range)
                 if _tunnel is not None:
-                    _, _tyz_y = _draw_tunnel_wall_yz(fig, _tunnel, row=current_row, flip=flip_bend)
-                    fig.update_yaxes(title_text='Y (m)', row=current_row, col=1,
-                                     range=_yz_rng if _yz_rng else _tyz_y)
+                    _, _txz_x = _draw_tunnel_wall_xz(fig, _tunnel, row=current_row, flip=flip_bend)
+                    fig.update_yaxes(title_text='X (m)', row=current_row, col=1,
+                                     range=_xz_rng if _xz_rng else _txz_x)
                 else:
-                    fig.update_yaxes(title_text='Y (m)', row=current_row, col=1,
-                                     range=_yz_rng if _yz_rng else [y_center - yz_half - _yz_h, y_center + yz_half + _yz_h])
+                    if _xz_rng:
+                        fig.update_yaxes(title_text='X (m)', row=current_row, col=1, range=_xz_rng)
+                    elif use_flr_y:
+                        _xz_half_range = _xz_half + _xz_h
+                        fig.update_yaxes(title_text='X (m)', row=current_row, col=1,
+                                         range=[_x_center - _xz_half_range, _x_center + _xz_half_range])
+                    else:
+                        # dead-reckoning (no survey coords) — leave XZ auto-ranged
+                        fig.update_yaxes(title_text='X (m)', row=current_row, col=1)
+                if equal_aspect: _lock_floor_aspect(fig, _xz_floor_row)
                 current_row += 1
                 _floor_panel_idx += 1
 
-        # Data panels
-        first_s_row = current_row
-        _tune_annotated = False  # only annotate once on first data panel
-        # In lite mode build element name lookup array once for all panels
-        _elem_names = _make_elem_name_array(s, elements) if bar_lite else None
-        for i, p in enumerate(panels):
-            _prog(55 + int(30 * i / max(len(panels), 1)), f'Building panel: {p}...')
-            legend_n      = f'legend{i+1}'
-            has_secondary = (p == 'twiss') or\
-                (isinstance(p, dict) and bool(p.get('y2'))) or\
-                (isinstance(p, dict) and p.get('type') == 'expr' and bool(p.get('y2_expr', '').strip()))
-            bp_full = {**beam_params, 'alpha_a':al_a, 'alpha_b':al_b}
+            # Handle each floor-yz panel separately (user may add multiple with different halves)
+            _yz_panel_list = [p for p in panels if p == 'floor-yz']
+            if _yz_panel_list:
+                _prog(52, 'Building floor plan (Y-Z)...')
+                # Per-panel universe source for floor-yz (per occurrence)
+                _fyz_srcs = [next((pm.get('panel_source') for pm in (panel_metadata or [])
+                                   if pm.get('spec') == 'floor-yz'), None)]
+                while len(_fyz_srcs) < len(_yz_panel_list): _fyz_srcs.append(None)
+                _yz_ratio = element_height_yz if element_height_yz is not None else 0.05
+                use_flr_y2 = any('flr_y0' in e for e in elements)
+                _s_ext_yz = max((e['s_start'] + e['length']) for e in elements) if elements else 1.0
+                _y_vals = ([e.get('flr_y0', 0.0) for e in elements] +
+                           [e.get('flr_y1', 0.0) for e in elements]) if use_flr_y2 else []
+                _yz_h, y_center, yz_half = _floor_sizing(_y_vals, _s_ext_yz,
+                                            _parse_fp_range(fp_yz_range), _yz_ratio)
+                _primary_yz_height = _yz_h
 
-            # ── Skip floor panels — already rendered above ─────────────────
-            if p in ('floor-xz', 'floor-yz'):
-                continue
+                # Get yz_ring_half per panel occurrence from the panels metadata
+                _yz_ring_halves = [_p_meta.get('yz_ring_half', yz_ring_half)
+                                   for _p_meta in (panel_metadata or [])
+                                   if _p_meta.get('spec') == 'floor-yz'] if panel_metadata else []
+                # Pad with default if fewer metadata entries than panels
+                while len(_yz_ring_halves) < len(_yz_panel_list):
+                    _yz_ring_halves.append(yz_ring_half)
 
-            # ── Beamline bar panel ────────────────────────────────────────
-            if p == 'bar':
-                _build_layout_bar(fig, elements, show_element_labels, row=current_row,
-                                  show_markers=show_markers_bar, bar_lite=bar_lite,
-                                  elem_colors=elem_colors)
-                _bar_annot = (panel_annotations or {}).get(i, '')
-                if not _bar_annot and isinstance(p, dict):
-                    _bar_annot = p.get('annot_pattern', '').strip()
-                if _bar_annot:
-                    _build_bar_annotations(fig, elements, _bar_annot, row=current_row,
-                                           annot_font_size=int((font_sizes or {}).get('annot', 8)))
-                ref = f'x{first_s_row}' if first_s_row > 1 else 'x'
-                fig.update_xaxes(matches=ref, row=current_row, col=1)
-                fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
-                                 row=current_row, col=1)
-                fig.update_yaxes(title_text='', showticklabels=False,
-                                 range=[-0.4, 0.4], row=current_row, col=1)
-                current_row += 1
-                continue
+                for _yz_idx in range(len(_yz_panel_list)):
+                    _this_half = _yz_ring_halves[_yz_idx]
+                    _fyz_src = _fyz_srcs[_yz_idx] if _yz_idx < len(_fyz_srcs) else None
+                    _fyz_unis = [_fyz_src] if _fyz_src is not None and _fyz_src in _all_uni_data else _plot_unis
+                    for _ui, _uid in enumerate(_fyz_unis):
+                        _ud = _all_uni_data[_uid]
+                        _uelems = _ud['elements']
+                        _base = 1000 + _floor_panel_idx * 10
+                        _fp_leg = f'legend{_base + 1}' if _ui == 0 else f'legend{_base + _ui * 2 + 1}'
+                        _el_leg = f'legend{_base}'     if _ui == 0 else f'legend{_base + _ui * 2}'
+                        _build_floor_plan_yz(fig, _uelems, _yz_h, flip_bend, yz_half=_this_half,
+                                             row=current_row,
+                                             legend_name=_el_leg, fp_legend_name=_fp_leg,
+                                             show_fp_legend=(_ui == 0 and 'floor-xz' not in panels and _yz_idx == 0
+                                                             and not _panel_hide_legend('floor-yz', _yz_idx)),
+                                             beampipe_color=_BEAMPIPE_COLORS[_ui % len(_BEAMPIPE_COLORS)] if color_beampipes else 'gray',
+                                             show_markers=show_markers, elem_colors=elem_colors)
+                    fig.update_xaxes(title_text='Z (m)', row=current_row, col=1)
+                    _yz_rng = _parse_fp_range(fp_yz_range)
+                    if _tunnel is not None:
+                        _, _tyz_y = _draw_tunnel_wall_yz(fig, _tunnel, row=current_row, flip=flip_bend)
+                        fig.update_yaxes(title_text='Y (m)', row=current_row, col=1,
+                                         range=_yz_rng if _yz_rng else _tyz_y)
+                    else:
+                        fig.update_yaxes(title_text='Y (m)', row=current_row, col=1,
+                                         range=_yz_rng if _yz_rng else [y_center - yz_half - _yz_h, y_center + yz_half + _yz_h])
+                    if equal_aspect: _lock_floor_aspect(fig, current_row)
+                    current_row += 1
+                    _floor_panel_idx += 1
 
-            # ── Summary panel ─────────────────────────────────────────────
-            if p == 'summary':
-                _build_summary_panel(fig, _all_uni_data, _plot_unis, _uni_labels,
-                                     beam_params, row=current_row)
-                current_row += 1
-                continue
+            # Data panels
+            first_s_row = current_row
+            _tune_annotated = False  # only annotate once on first data panel
+            # In lite mode build element name lookup array once for all panels
+            _elem_names = _make_elem_name_array(s, elements) if bar_lite else None
+            _panel_spec_occ = {}  # tracks per-spec occurrence for panel_source lookup
+            for i, p in enumerate(panels):
+                _prog(55 + int(30 * i / max(len(panels), 1)), f'Building panel: {p}...')
+                legend_n      = f'legend{i+1}'
+                # Horizontal mode: all panels share one legend; hidden panels use invisible key
+                # hide_legend is stored in the panel dict (dict panels) or in panels_meta
+                _p_hide = bool(p.get('hide_legend', False)) if isinstance(p, dict) else bool((panels_meta or {}).get(i, {}).get('hide_legend', False))
+                if _p_hide:
+                    legend_n = f'legend{900+i}'  # high-numbered legend kept off-screen, never shown
+                elif _horiz:
+                    legend_n = 'legend1'  # shared horizontal legend (must be 'legend' or 'legendN', N>=1)
+                has_secondary = (p == 'twiss') or\
+                    (isinstance(p, dict) and bool(p.get('y2'))) or\
+                    (isinstance(p, dict) and p.get('type') == 'expr' and bool(p.get('y2_expr', '').strip()))
+                bp_full = {**beam_params, 'alpha_a':al_a, 'alpha_b':al_b}
 
-            # ── Lattice diff panel ─────────────────────────────────────────
-            if p == 'latdiff':
-                if _cmp_datasets:
-                    _primary_uid = _plot_unis[0]
-                    _elems_a = _all_uni_data[_primary_uid]['elements']
-                    _label_a = _uni_labels.get(_primary_uid, 'Primary')
-                    _cd = _cmp_datasets[0]
-                    _cprimary = _cd['plot_unis'][0]
-                    _elems_b = _cd['all_uni'][_cprimary]['elements']
-                    _label_b = _cd['label']
-                    _build_latdiff_panel(fig, _elems_a, _elems_b, _label_a, _label_b,
-                                         row=current_row)
-                    current_row += 3  # three table rows: strengths, entry, exit
+                # ── Per-panel universe override ───────────────────────────────
+                # Resolve per-panel source into LOCAL variables only.
+                # Never mutate the outer-scope s/ba/elements — they stay as the
+                # global primary values for the full layout (axis linking, etc.).
+                # Look up panel_source from the original panel_metadata list.
+                # panels is reordered (floor first, bar last) so index i is wrong.
+                # Instead match by spec string + occurrence order.
+                _spec_str = p if isinstance(p, str) else (p.get('type', '') if isinstance(p, dict) else '')
+                _panel_src = None
+                if panel_metadata:
+                    if isinstance(p, dict):
+                        # Dict specs (custom/expression panels) have no stable type
+                        # string, so match by identity — panels and panel_metadata's
+                        # spec objects are the same references (see gui.py _get_panels()).
+                        _matches = [pm for pm in panel_metadata if pm.get('spec') is p]
+                        if _matches:
+                            _panel_src = _matches[0].get('panel_source', None)
+                    else:
+                        _occ = _panel_spec_occ.get(_spec_str, 0)
+                        _matches = [pm for pm in panel_metadata if pm.get('spec') == _spec_str]
+                        if _occ < len(_matches):
+                            _panel_src = _matches[_occ].get('panel_source', None)
+                        _panel_spec_occ[_spec_str] = _occ + 1
+                if _panel_src is not None and _panel_src in _all_uni_data:
+                    _panel_unis  = [_panel_src]
+                    _panel_multi = False
+                    _p_ud        = _all_uni_data[_panel_src]
                 else:
-                    current_row += 3
-                continue
+                    _panel_unis  = _plot_unis
+                    _panel_multi = _multi
+                    _p_ud        = _pdata
+                # Local copies used only within this panel's render calls
+                _p_s       = _p_ud['s']
+                _p_ba      = _p_ud['beta_a'];   _p_bb = _p_ud['beta_b']
+                _p_ex      = _p_ud['eta_x'];    _p_ey = _p_ud['eta_y']
+                _p_ox      = _p_ud['orbit_x'];  _p_oy = _p_ud['orbit_y']
+                _p_pa      = _p_ud['phi_a'];    _p_pb = _p_ud['phi_b']
+                _p_al_a    = _p_ud.get('alpha_a', np.zeros_like(_p_s))
+                _p_al_b    = _p_ud.get('alpha_b', np.zeros_like(_p_s))
+                _p_bp      = {**beam_params, 'alpha_a': _p_al_a, 'alpha_b': _p_al_b}
+                _p_elems   = _p_ud['elements']
+                _p_enames  = _make_elem_name_array(_p_s, _p_elems) if bar_lite else None
 
-            # ── Expression panel: query live from backend ─────────────────
-            if isinstance(p, dict) and p.get('type') == 'expr':
-                if _multi:
-                    # ── Multi-universe: evaluate expression for each universe ──
-                    y1_lbl = p.get('y1_label', p.get('y1_expr', ''))
-                    y2_lbl = p.get('y2_label', p.get('y2_expr', '')) or None
-                    for _ui, _uid in enumerate(_plot_unis):
+                # ── Skip floor panels — already rendered above ─────────────────
+                if p in ('floor-xz', 'floor-yz'):
+                    continue
+
+                # ── Beamline bar panel ────────────────────────────────────────
+                if p == 'bar':
+                    _build_layout_bar(fig, _p_elems, show_element_labels, row=current_row,
+                                      show_markers=show_markers_bar, bar_lite=bar_lite,
+                                      elem_colors=elem_colors, elem_ratio=bar_elem_ratio)
+                    _bar_annot = (panel_annotations or {}).get(i, '')
+                    if not _bar_annot and isinstance(p, dict):
+                        _bar_annot = p.get('annot_pattern', '').strip()
+                    if _bar_annot:
+                        _build_bar_annotations(fig, _p_elems, _bar_annot, row=current_row,
+                                               annot_font_size=int((font_sizes or {}).get('annot', 8)))
+                    ref = f'x{first_s_row}' if first_s_row > 1 else 'x'
+                    fig.update_xaxes(matches=ref, row=current_row, col=1)
+                    fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
+                                     row=current_row, col=1)
+                    fig.update_yaxes(title_text='', showticklabels=False,
+                                     range=[-0.4, 0.4], row=current_row, col=1)
+                    current_row += 1
+                    continue
+
+                # ── Summary panel ─────────────────────────────────────────────
+                if p == 'summary':
+                    _build_summary_panel(fig, _all_uni_data, _plot_unis, _uni_labels,
+                                         beam_params, row=current_row)
+                    current_row += 1
+                    continue
+
+                # ── Lattice diff panel ─────────────────────────────────────────
+                if p == 'latdiff':
+                    if _cmp_datasets:
+                        _primary_uid = _plot_unis[0]
+                        _elems_a = _all_uni_data[_primary_uid]['elements']
+                        _label_a = _uni_labels.get(_primary_uid, 'Primary')
+                        _cd = _cmp_datasets[0]
+                        _cprimary = _cd['plot_unis'][0]
+                        _elems_b = _cd['all_uni'][_cprimary]['elements']
+                        _label_b = _cd['label']
+                        _build_latdiff_panel(fig, _elems_a, _elems_b, _label_a, _label_b,
+                                             row=current_row)
+                        current_row += 3  # three table rows: strengths, entry, exit
+                    else:
+                        current_row += 3
+                    continue
+
+                # ── Expression panel: query live from backend ─────────────────
+                if isinstance(p, dict) and p.get('type') == 'expr':
+                    if _panel_multi:
+                        # ── Multi-universe: evaluate expression for each universe ──
+                        y1_lbl = p.get('y1_label', p.get('y1_expr', ''))
+                        y2_lbl = p.get('y2_label', p.get('y2_expr', '')) or None
+                        for _ui, _uid in enumerate(_panel_unis):
+                            _ulbl = _uni_labels.get(_uid, f'u{_uid}')
+                            _ud   = _all_uni_data[_uid]
+                            _pal  = _UNI_PALETTES[_ui % len(_UNI_PALETTES)]
+                            # Tag the legend name with universe label
+                            _p_tagged = dict(p)
+                            _p_tagged['y1_label'] = f"{p.get('y1_label', p.get('y1_expr', ''))} ({_ulbl})"
+                            if p.get('y2_expr', '').strip():
+                                _p_tagged['y2_label'] = f"{p.get('y2_label', p.get('y2_expr', ''))} ({_ulbl})"
+                            result = _build_expr_panel(
+                                fig, _p_tagged, _ud, code, _ud['s'],
+                                row=current_row, legend_name=legend_n,
+                                log_fn=log_fn, uni_idx=_uid, palette=_pal)
+                    else:
+                        # ── Single universe ───────────────────────────────────────
+                        result = _build_expr_panel(
+                            fig, p, _p_ud, code, _p_s,
+                            row=current_row, legend_name=legend_n,
+                            log_fn=log_fn, uni_idx=_panel_unis[0])
+                        y1_lbl = result[0] if result else ''
+                        y2_lbl = result[1] if result else None
+                    fig.update_yaxes(title_text=y1_lbl, row=current_row, col=1, secondary_y=False)
+                    if y2_lbl:
+                        fig.update_yaxes(title_text=y2_lbl, row=current_row, col=1, secondary_y=True)
+                    if not _tune_annotated and not _multi and show_tune:
+                        _build_tune_annotation(fig, beam_params, row=current_row)
+                        _tune_annotated = True
+                    _eref = f'x{first_s_row}' if first_s_row > 1 else 'x'
+                    if current_row != first_s_row:
+                        fig.update_xaxes(matches=_eref, row=current_row, col=1)
+                    _annot_pat = (panel_annotations or {}).get(i, '') or p.get('annot_pattern', '').strip()
+                    if _annot_pat:
+                        _build_panel_annotations(fig, _p_elems, _annot_pat, row=current_row,
+                                                 annot_font_size=int((font_sizes or {}).get('annot', 8)))
+                    current_row += 1
+                    continue
+                if _panel_multi:
+                    # ── Multi-universe: use _build_panel3_uni for ALL universes ──
+                    result = None
+                    for _ui, _uid in enumerate(_panel_unis):
                         _ulbl = _uni_labels.get(_uid, f'u{_uid}')
                         _ud   = _all_uni_data[_uid]
                         _pal  = _UNI_PALETTES[_ui % len(_UNI_PALETTES)]
-                        # Tag the legend name with universe label
-                        _p_tagged = dict(p)
-                        _p_tagged['y1_label'] = f"{p.get('y1_label', p.get('y1_expr', ''))} ({_ulbl})"
-                        if p.get('y2_expr', '').strip():
-                            _p_tagged['y2_label'] = f"{p.get('y2_label', p.get('y2_expr', ''))} ({_ulbl})"
-                        result = _build_expr_panel(
-                            fig, _p_tagged, _ud, code, _ud['s'],
+                        _us = _ud['s']; _uba = _ud['beta_a']; _ubb = _ud['beta_b']
+                        _uex = _ud['eta_x']; _uey = _ud['eta_y']
+                        _uox = _ud['orbit_x']; _uoy = _ud['orbit_y']
+                        _upa = _ud['phi_a']; _upb = _ud['phi_b']
+                        _ual_a = _ud.get('alpha_a', np.zeros_like(_us))
+                        _ual_b = _ud.get('alpha_b', np.zeros_like(_us))
+                        _ubp = {**beam_params, 'alpha_a': _ual_a, 'alpha_b': _ual_b}
+                        _build_panel3_uni(fig, p,
+                            _us, _uba, _ubb, _uex, _uey,
+                            _uox, _uoy, _upa, _upb,
+                            _ual_a, _ual_b, _ubp,
                             row=current_row, legend_name=legend_n,
-                            log_fn=log_fn, uni_idx=_uid, palette=_pal)
+                            uni_label=_ulbl, palette=_pal,
+                            uni_idx=_ui, elem_names=_p_enames)
                 else:
-                    # ── Single universe ───────────────────────────────────────
-                    result = _build_expr_panel(
-                        fig, p, _pdata, code, s,
-                        row=current_row, legend_name=legend_n,
-                        log_fn=log_fn, uni_idx=_plot_unis[0])
+                    # ── Single universe: original path ────────────────────────────
+                    result = _build_panel3(fig, p, _p_s, _p_ba, _p_bb, _p_ex, _p_ey,
+                                  _p_ox, _p_oy, _p_pa, _p_pb,
+                                  row=current_row, legend_name=legend_n,
+                                  row3_secondary=has_secondary,
+                                  beam_params=_p_bp, elem_names=_p_enames)
+
+                # y-axis labels
+                if isinstance(p, dict):
                     y1_lbl = result[0] if result else ''
                     y2_lbl = result[1] if result else None
-                fig.update_yaxes(title_text=y1_lbl, row=current_row, col=1, secondary_y=False)
-                if y2_lbl:
-                    fig.update_yaxes(title_text=y2_lbl, row=current_row, col=1, secondary_y=True)
-                if not _tune_annotated and not _multi and show_tune:
+                else:
+                    y1_lbl = p.get('name', '') if isinstance(p, dict) else _ytitle_l.get(p, '')
+                    y2_lbl = _ytitle_r.get(p, '') if p == 'twiss' else None
+                fig.update_yaxes(title_text=y1_lbl,
+                                 row=current_row, col=1, secondary_y=False)
+                if has_secondary:
+                    if p == 'twiss':
+                        # ── Twiss preset: align beta/dispersion gridlines at zero ──
+                        nice = [1, 2, 2.5, 5, 10]
+                        # Compute true max across only this panel's plotted universes
+                        _all_ba = [_all_uni_data[_uid]['beta_a'] for _uid in _panel_unis]
+                        _all_bb = [_all_uni_data[_uid]['beta_b'] for _uid in _panel_unis]
+                        _all_ex = [_all_uni_data[_uid]['eta_x']  for _uid in _panel_unis]
+                        _all_ey = [_all_uni_data[_uid]['eta_y']  for _uid in _panel_unis]
+                        _beta_all = np.concatenate(_all_ba + _all_bb)
+                        _disp_all = np.concatenate(_all_ex + _all_ey)
+                        beta_max = float(np.nanmax(_beta_all)) * 1.1 if len(_beta_all) else 1.0
+                        raw_beta_dt = beta_max / 5
+                        mag = 10 ** np.floor(np.log10(raw_beta_dt)) if raw_beta_dt > 0 else 1.0
+                        beta_dt = mag * min(nice, key=lambda x: abs(x - raw_beta_dt / mag))
+                        beta_range_max = np.ceil(beta_max / beta_dt) * beta_dt
+                        n_above = int(round(beta_range_max / beta_dt))
+                        d_min = float(np.nanmin(_disp_all)) * 1.1 if len(_disp_all) else 0.0
+                        d_max = float(np.nanmax(_disp_all)) * 1.1 if len(_disp_all) else 1.0
+                        raw_disp_dt = max(d_max, abs(d_min)) / max(n_above, 1)
+                        mag2 = 10 ** np.floor(np.log10(raw_disp_dt)) if raw_disp_dt > 0 else 1.0
+                        disp_dt = mag2 * min(nice, key=lambda x: abs(x - raw_disp_dt / mag2))
+                        n_disp_above = int(np.ceil(d_max / disp_dt)) if d_max > 0 else 0
+                        n_disp_below = int(np.ceil(abs(d_min) / disp_dt)) if d_min < 0 else 0
+                        n_above = max(n_above, n_disp_above)
+                        beta_range_max = n_above * beta_dt
+                        disp_range_max = n_disp_above * disp_dt
+                        disp_range_min = -n_disp_below * disp_dt
+                        fig.update_yaxes(title_text=y1_lbl,
+                                         row=current_row, col=1, secondary_y=False,
+                                         range=[0, beta_range_max], dtick=beta_dt,
+                                         showgrid=True)
+                        fig.update_yaxes(title_text=y2_lbl or _ytitle_r.get(p, ''),
+                                         row=current_row, col=1, secondary_y=True,
+                                         range=[disp_range_min, disp_range_max],
+                                         dtick=disp_dt, showgrid=True,
+                                         gridcolor='rgba(100,200,100,0.3)',
+                                         griddash='dash')
+                    else:
+                        # ── Custom panel: auto-scale each axis independently ───────
+                        fig.update_yaxes(title_text=y1_lbl,
+                                         row=current_row, col=1, secondary_y=False,
+                                         autorange=True, showgrid=True)
+                        fig.update_yaxes(title_text=y2_lbl or '',
+                                         row=current_row, col=1, secondary_y=True,
+                                         autorange=True, showgrid=True,
+                                         gridcolor='rgba(100,200,100,0.3)',
+                                         griddash='dash')
+                # Link all data panel x-axes together (since shared_xaxes=False)
+                if shared_xaxis:
+                    ref = f'x{first_s_row}' if first_s_row > 1 else 'x'
+                    if current_row != first_s_row:
+                        fig.update_xaxes(matches=ref, row=current_row, col=1)
+                # Element annotations for this panel
+                _annot_pat = (panel_annotations or {}).get(i, '')
+                if not _annot_pat and isinstance(p, dict):
+                    _annot_pat = p.get('annot_pattern', '').strip()
+                if _annot_pat:
+                    _build_panel_annotations(fig, _p_elems, _annot_pat, row=current_row,
+                                             annot_font_size=int((font_sizes or {}).get('annot', 8)))
+                # Add tune/chroma annotation to first data panel
+                if show_tune and not _tune_annotated and not _multi:
                     _build_tune_annotation(fig, beam_params, row=current_row)
                     _tune_annotated = True
-                _eref = f'x{first_s_row}' if first_s_row > 1 else 'x'
-                if current_row != first_s_row:
-                    fig.update_xaxes(matches=_eref, row=current_row, col=1)
-                _annot_pat = (panel_annotations or {}).get(i, '') or p.get('annot_pattern', '').strip()
-                if _annot_pat:
-                    _build_panel_annotations(fig, elements, _annot_pat, row=current_row,
-                                             annot_font_size=int((font_sizes or {}).get('annot', 8)))
                 current_row += 1
-                continue
-            if _multi:
-                # ── Multi-universe: use _build_panel3_uni for ALL universes ──
-                result = None
-                for _ui, _uid in enumerate(_plot_unis):
-                    _ulbl = _uni_labels.get(_uid, f'u{_uid}')
-                    _ud   = _all_uni_data[_uid]
-                    _pal  = _UNI_PALETTES[_ui % len(_UNI_PALETTES)]
-                    _us = _ud['s']; _uba = _ud['beta_a']; _ubb = _ud['beta_b']
-                    _uex = _ud['eta_x']; _uey = _ud['eta_y']
-                    _uox = _ud['orbit_x']; _uoy = _ud['orbit_y']
-                    _upa = _ud['phi_a']; _upb = _ud['phi_b']
-                    _ual_a = _ud.get('alpha_a', np.zeros_like(_us))
-                    _ual_b = _ud.get('alpha_b', np.zeros_like(_us))
-                    _ubp = {**beam_params, 'alpha_a': _ual_a, 'alpha_b': _ual_b}
-                    _build_panel3_uni(fig, p,
-                        _us, _uba, _ubb, _uex, _uey,
-                        _uox, _uoy, _upa, _upb,
-                        _ual_a, _ual_b, _ubp,
-                        row=current_row, legend_name=legend_n,
-                        uni_label=_ulbl, palette=_pal,
-                        uni_idx=_ui, elem_names=_elem_names)
-            else:
-                # ── Single universe: original path ────────────────────────────
-                result = _build_panel3(fig, p, s, ba, bb, ex, ey, ox, oy, pa, pb,
-                              row=current_row, legend_name=legend_n,
-                              row3_secondary=has_secondary,
-                              beam_params=bp_full, elem_names=_elem_names)
 
-            # y-axis labels
-            if isinstance(p, dict):
-                y1_lbl = result[0] if result else ''
-                y2_lbl = result[1] if result else None
-            else:
-                y1_lbl = p.get('name', '') if isinstance(p, dict) else _ytitle_l.get(p, '')
-                y2_lbl = _ytitle_r.get(p, '') if p == 'twiss' else None
-            fig.update_yaxes(title_text=y1_lbl,
-                             row=current_row, col=1, secondary_y=False)
-            if has_secondary:
-                if p == 'twiss':
-                    # ── Twiss preset: align beta/dispersion gridlines at zero ──
-                    nice = [1, 2, 2.5, 5, 10]
-                    # Compute true max across ALL plotted universes
-                    _all_ba = [_all_uni_data[_uid]['beta_a'] for _uid in _plot_unis]
-                    _all_bb = [_all_uni_data[_uid]['beta_b'] for _uid in _plot_unis]
-                    _all_ex = [_all_uni_data[_uid]['eta_x']  for _uid in _plot_unis]
-                    _all_ey = [_all_uni_data[_uid]['eta_y']  for _uid in _plot_unis]
-                    _beta_all = np.concatenate(_all_ba + _all_bb)
-                    _disp_all = np.concatenate(_all_ex + _all_ey)
-                    beta_max = float(np.nanmax(_beta_all)) * 1.1 if len(_beta_all) else 1.0
-                    raw_beta_dt = beta_max / 5
-                    mag = 10 ** np.floor(np.log10(raw_beta_dt))
-                    beta_dt = mag * min(nice, key=lambda x: abs(x - raw_beta_dt / mag))
-                    beta_range_max = np.ceil(beta_max / beta_dt) * beta_dt
-                    n_above = int(round(beta_range_max / beta_dt))
-                    d_min = float(np.nanmin(_disp_all)) * 1.1 if len(_disp_all) else 0.0
-                    d_max = float(np.nanmax(_disp_all)) * 1.1 if len(_disp_all) else 1.0
-                    raw_disp_dt = max(d_max, abs(d_min)) / max(n_above, 1)
-                    mag2 = 10 ** np.floor(np.log10(raw_disp_dt)) if raw_disp_dt > 0 else 1.0
-                    disp_dt = mag2 * min(nice, key=lambda x: abs(x - raw_disp_dt / mag2))
-                    n_disp_above = int(np.ceil(d_max / disp_dt)) if d_max > 0 else 0
-                    n_disp_below = int(np.ceil(abs(d_min) / disp_dt)) if d_min < 0 else 0
-                    n_above = max(n_above, n_disp_above)
-                    beta_range_max = n_above * beta_dt
-                    disp_range_max = n_disp_above * disp_dt
-                    disp_range_min = -n_disp_below * disp_dt
-                    fig.update_yaxes(title_text=y1_lbl,
-                                     row=current_row, col=1, secondary_y=False,
-                                     range=[0, beta_range_max], dtick=beta_dt,
-                                     showgrid=True)
-                    fig.update_yaxes(title_text=y2_lbl or _ytitle_r.get(p, ''),
-                                     row=current_row, col=1, secondary_y=True,
-                                     range=[disp_range_min, disp_range_max],
-                                     dtick=disp_dt, showgrid=True,
-                                     gridcolor='rgba(100,200,100,0.3)',
-                                     griddash='dash')
-                else:
-                    # ── Custom panel: auto-scale each axis independently ───────
-                    fig.update_yaxes(title_text=y1_lbl,
-                                     row=current_row, col=1, secondary_y=False,
-                                     autorange=True, showgrid=True)
-                    fig.update_yaxes(title_text=y2_lbl or '',
-                                     row=current_row, col=1, secondary_y=True,
-                                     autorange=True, showgrid=True,
-                                     gridcolor='rgba(100,200,100,0.3)',
-                                     griddash='dash')
-            # Link all data panel x-axes together (since shared_xaxes=False)
-            ref = f'x{first_s_row}' if first_s_row > 1 else 'x'
-            if current_row != first_s_row:
-                fig.update_xaxes(matches=ref, row=current_row, col=1)
-            # Element annotations for this panel
-            _annot_pat = (panel_annotations or {}).get(i, '')
-            if not _annot_pat and isinstance(p, dict):
-                _annot_pat = p.get('annot_pattern', '').strip()
-            if _annot_pat:
-                _build_panel_annotations(fig, elements, _annot_pat, row=current_row,
-                                         annot_font_size=int((font_sizes or {}).get('annot', 8)))
-            # Add tune/chroma annotation to first data panel
-            if show_tune and not _tune_annotated and not _multi:
-                _build_tune_annotation(fig, beam_params, row=current_row)
-                _tune_annotated = True
-            current_row += 1
+            # If no bar panel in list, put s-axis label on last data panel
+            if not include_bar:
+                last_data_row = current_row - 1
+                fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
+                                 row=last_data_row, col=1)
 
-        # If no bar panel in list, put s-axis label on last data panel
-        if not include_bar:
-            last_data_row = current_row - 1
-            fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
-                             row=last_data_row, col=1)
-
-        # Figure-level layout — height already set above from panel_heights
-        fig_h = total_h
-        fig_w = None
-        if aspect_ratio:
-            try:
-                parts = str(aspect_ratio).split(':')
-                aw, ah = float(parts[0]), float(parts[1])
-                fig_w = int(fig_h * aw / ah)
-            except Exception:
-                pass
-        lkw = dict(height=fig_h, hovermode='closest')
-        if fig_w: lkw['width'] = fig_w
-
-        # Compute exact vertical midpoint of each row in normalized [0,1] coords.
-        row_tops = []
-        cursor = 1.0
-        for h in row_heights_norm:
-            row_tops.append(cursor)
-            cursor -= h + v_spacing
-
-        row_mids = [row_tops[i] - row_heights_norm[i] / 2 for i in range(len(row_heights_norm))]
-
-        # Legend positioning — inside (top-right of subplot) or outside (right margin)
-        LEGEND_OFFSET = 0.01
-        if legend_inside:
-            LEGEND_X  = 0.98
-            LEGEND_XA = 'right'
-            LEGEND_BG = 'rgba(0,0,0,0)'
-            LEGEND_BC = '#1a3d1a'
-            x_domain  = [0.0, 1.0]
-        else:
-            LEGEND_X  = 1.02
-            LEGEND_XA = 'left'
-            LEGEND_BG = 'rgba(0,0,0,0)'
-            LEGEND_BC = '#1a3d1a'
-            x_domain  = [0.0, 0.95]
-
-        _lpos = legend_positions or {}
-
-        def _lgd(row_idx, pos_key=None):
-            y_top = row_tops[row_idx] if row_idx < len(row_tops) else 1.0
-            usr = _lpos.get(pos_key) if pos_key is not None else None
-            if usr and len(usr) == 2:
+            # Figure-level layout — height already set above from panel_heights
+            fig_h = total_h
+            fig_w = None
+            if aspect_ratio:
                 try:
-                    ux, uy = float(usr[0]), float(usr[1])
-                    # Convert per-panel normalized coords to paper coords:
-                    # ux: 0=left edge, 1=right edge (already paper space)
-                    # uy: 0=bottom of this panel, 1=top of this panel
-                    row_h = row_heights_norm[row_idx] if row_idx < len(row_heights_norm) else 0.1
-                    paper_y = y_top - (1.0 - uy) * row_h
-                    return dict(
-                        itemsizing='constant',
-                        bgcolor=LEGEND_BG,
-                        bordercolor=LEGEND_BC,
-                        borderwidth=1,
-                        x=ux, xanchor='left',
-                        y=paper_y, yanchor='top')
-                except (ValueError, TypeError):
+                    parts = str(aspect_ratio).split(':')
+                    aw, ah = float(parts[0]), float(parts[1])
+                    fig_w = int(fig_h * aw / ah)
+                except Exception:
                     pass
-            return dict(
-                itemsizing='constant',
-                bgcolor=LEGEND_BG,
-                bordercolor=LEGEND_BC,
-                borderwidth=1,
-                x=LEGEND_X, xanchor=LEGEND_XA,
-                y=y_top - LEGEND_OFFSET, yanchor='top')
+            lkw = dict(height=fig_h, hovermode='closest')
+            if fig_w: lkw['width'] = fig_w
 
-        row_idx = 0
-        if include_floor:
-            # Each floor panel gets its own legend pair keyed by panel index
-            for _fi, _fp in enumerate(_floor_panels):
-                for _ui in range(len(_plot_unis)):
-                    # Use unique legend keys per floor panel index to avoid overwriting
-                    _base = 1000 + _fi * 10  # e.g. 1000, 1010, 1020 for floor panels 0,1,2
-                    _fp_leg = f'legend{_base + 1}' if _ui == 0 else f'legend{_base + _ui * 2 + 1}'
-                    _el_leg = f'legend{_base}'     if _ui == 0 else f'legend{_base + _ui * 2}'
-                    if row_idx < len(row_tops):
-                        lkw[_fp_leg] = _lgd(row_idx, pos_key=f'{_fp}_{_fi}')
-                        lkw[_el_leg] = _lgd(row_idx, pos_key=f'{_fp}_{_fi}')
+            # Compute exact vertical midpoint of each row in normalized [0,1] coords.
+            row_tops = []
+            cursor = 1.0
+            for h in row_heights_norm:
+                row_tops.append(cursor)
+                cursor -= h + v_spacing
+
+            row_mids = [row_tops[i] - row_heights_norm[i] / 2 for i in range(len(row_heights_norm))]
+
+            # _lmode and _horiz already resolved at top of function
+            LEGEND_OFFSET = 0.01
+            if _lmode == 'inside':
+                LEGEND_X  = 0.98; LEGEND_XA = 'right'
+                LEGEND_BG = 'rgba(0,0,0,0)'; LEGEND_BC = '#1a3d1a'
+                x_domain  = [0.0, 1.0]
+            elif _horiz:
+                LEGEND_X  = 0.5;  LEGEND_XA = 'center'
+                LEGEND_BG = 'rgba(0,0,0,0)'; LEGEND_BC = '#1a3d1a'
+                x_domain  = [0.0, 1.0]
+            else:  # 'side'
+                LEGEND_X  = 1.02; LEGEND_XA = 'left'
+                LEGEND_BG = 'rgba(0,0,0,0)'; LEGEND_BC = '#1a3d1a'
+                x_domain  = [0.0, 0.95]
+
+            _lpos = legend_positions or {}
+
+            def _lgd(row_idx, pos_key=None):
+                y_top = row_tops[row_idx] if row_idx < len(row_tops) else 1.0
+                usr = _lpos.get(pos_key) if pos_key is not None else None
+                if usr and len(usr) == 2:
+                    try:
+                        ux, uy = float(usr[0]), float(usr[1])
+                        # Convert per-panel normalized coords to paper coords:
+                        # ux: 0=left edge, 1=right edge (already paper space)
+                        # uy: 0=bottom of this panel, 1=top of this panel
+                        row_h = row_heights_norm[row_idx] if row_idx < len(row_heights_norm) else 0.1
+                        paper_y = y_top - (1.0 - uy) * row_h
+                        return dict(
+                            itemsizing='constant',
+                            bgcolor=LEGEND_BG,
+                            bordercolor=LEGEND_BC,
+                            borderwidth=1,
+                            x=ux, xanchor='left',
+                            y=paper_y, yanchor='top')
+                    except (ValueError, TypeError):
+                        pass
+                return dict(
+                    itemsizing='constant',
+                    bgcolor=LEGEND_BG,
+                    bordercolor=LEGEND_BC,
+                    borderwidth=1,
+                    x=LEGEND_X, xanchor=LEGEND_XA,
+                    y=y_top - LEGEND_OFFSET, yanchor='top')
+
+            row_idx = 0
+            if include_floor:
+                # Each floor panel gets its own legend pair keyed by panel index
+                for _fi, _fp in enumerate(_floor_panels):
+                    for _ui in range(len(_plot_unis)):
+                        # Use unique legend keys per floor panel index to avoid overwriting
+                        _base = 1000 + _fi * 10  # e.g. 1000, 1010, 1020 for floor panels 0,1,2
+                        _fp_leg = f'legend{_base + 1}' if _ui == 0 else f'legend{_base + _ui * 2 + 1}'
+                        _el_leg = f'legend{_base}'     if _ui == 0 else f'legend{_base + _ui * 2}'
+                        if row_idx < len(row_tops):
+                            lkw[_fp_leg] = _lgd(row_idx, pos_key=f'{_fp}_{_fi}')
+                            lkw[_el_leg] = _lgd(row_idx, pos_key=f'{_fp}_{_fi}')
+                    row_idx += 1
+
+            # For horizontal legend modes: single shared legend, all panels point to 'legend1'
+            if _horiz:
+                _hy = -0.08 if _lmode == 'bottom' else 1.05
+                lkw['legend1'] = dict(
+                    orientation='h', x=0.5, xanchor='center',
+                    y=_hy, yanchor='top' if _lmode == 'bottom' else 'bottom',
+                    itemsizing='constant', bgcolor=LEGEND_BG,
+                    bordercolor=LEGEND_BC, borderwidth=1,
+                    font=dict(size=9),
+                )
+
+            for i, p in enumerate(panels):
+                if p in ('floor-xz', 'floor-yz'): continue
+                if row_idx < len(row_tops):
+                    _PRESET_SPECS = {'twiss','beta','dispersion','alpha','orbit','phase','beamsize','twiss_disp','bar','summary','latdiff'}
+                    _pk = p if (isinstance(p, str) and p in _PRESET_SPECS) else (p.get('name', i) if isinstance(p, dict) else i)
+                    # Check per-panel hide_legend flag
+                    _panel_hide = bool(p.get('hide_legend', False)) if isinstance(p, dict) else bool((panels_meta or {}).get(i, {}).get('hide_legend', False))
+                    # For horizontal mode, point all visible panels to shared 'legend1'
+                    # For hidden panels, point to a dummy invisible legend key matching legend_n above
+                    if _panel_hide:
+                        lkw[f'legend{900+i}'] = dict(visible=False, x=-2, y=-2)
+                    elif _horiz:
+                        pass  # all traces will use 'legend1' (the shared horizontal one, set above)
+                    else:
+                        lkw[f'legend{i+1}'] = _lgd(row_idx, pos_key=_pk)
                 row_idx += 1
 
-        for i, p in enumerate(panels):
-            if p in ('floor-xz', 'floor-yz'): continue
-            if row_idx < len(row_tops):
-                # Use spec string for preset panels, index for custom/expr (data panels preserve order)
-                _PRESET_SPECS = {'twiss','beta','dispersion','alpha','orbit','phase','beamsize','twiss_disp','bar','summary','latdiff'}
-                _pk = p if (isinstance(p, str) and p in _PRESET_SPECS) else (p.get('name', i) if isinstance(p, dict) else i)
-                lkw[f'legend{i+1}'] = _lgd(row_idx, pos_key=_pk)
-            row_idx += 1
+            for r in range(1, n_rows + 1):
+                ax = f'xaxis{r}' if r > 1 else 'xaxis'
+                lkw[ax] = dict(domain=x_domain)
+            fig.update_layout(**lkw)
+            # Set domain on any additional xaxes created by secondary_y=True
+            for ax in fig.layout:
+                if ax.startswith('xaxis') and ax not in lkw:
+                    fig.layout[ax].domain = x_domain
 
-        for r in range(1, n_rows + 1):
-            ax = f'xaxis{r}' if r > 1 else 'xaxis'
-            lkw[ax] = dict(domain=x_domain)
-        fig.update_layout(**lkw)
-        # Set domain on any additional xaxes created by secondary_y=True
-        for ax in fig.layout:
-            if ax.startswith('xaxis') and ax not in lkw:
-                fig.layout[ax].domain = x_domain
+            # ── Separate mode: one mini-figure per panel slot, interleaved ──────────
+            # Order: [floor group] [panel0 group] [panel1 group] ... [bar group]
+            # Each group = primary row + one row per compare file
+            if compare_mode == 'separate' and _cmp_datasets:
+                _log(f"[compare] Building interleaved panels for {len(_cmp_datasets)} file(s)...")
 
-        # ── Separate mode: one mini-figure per panel slot, interleaved ──────────
-        # Order: [floor group] [panel0 group] [panel1 group] ... [bar group]
-        # Each group = primary row + one row per compare file
-        if compare_mode == 'separate' and _cmp_datasets:
-            _log(f"[compare] Building interleaved panels for {len(_cmp_datasets)} file(s)...")
+                # Pre-extract compare data for all files
+                _csep = []
+                for ci, cd in enumerate(_cmp_datasets):
+                    cprimary = cd['plot_unis'][0]
+                    cpdata   = cd['all_uni'][cprimary]
+                    cs_c  = cpdata['s']
+                    if normalize_s and float(cs_c[-1]) > 0:
+                        cs_c = cs_c / float(cs_c[-1])
+                    cbp_raw = cpdata.get('beam_params', {})
+                    _csep.append({
+                        'label':  cd['label'],
+                        'code':   cd['code'],
+                        'pdata':  cpdata,
+                        's':      cs_c,
+                        'ba':     cpdata['beta_a'],   'bb': cpdata['beta_b'],
+                        'ex':     cpdata['eta_x'],    'ey': cpdata['eta_y'],
+                        'al_a':   cpdata.get('alpha_a', np.zeros_like(cs_c)),
+                        'al_b':   cpdata.get('alpha_b', np.zeros_like(cs_c)),
+                        'ox':     cpdata['orbit_x'],  'oy': cpdata['orbit_y'],
+                        'pa':     cpdata['phi_a'],    'pb': cpdata['phi_b'],
+                        'elems':  cpdata['elements'],
+                        'bp': {
+                            'emit_x':   emit_x   if emit_x   is not None else cbp_raw.get('emit_x',   0.0),
+                            'emit_y':   emit_y   if emit_y   is not None else cbp_raw.get('emit_y',   0.0),
+                            'sigma_dp': sigma_dp if sigma_dp is not None else cbp_raw.get('sigma_dp', 0.0),
+                            'n_sigma':  float(n_sigma) if n_sigma is not None else 1.0,
+                            'alpha_a':  cpdata.get('alpha_a', np.zeros_like(cs_c)),
+                            'alpha_b':  cpdata.get('alpha_b', np.zeros_like(cs_c)),
+                        },
+                        'pal':    _UNI_PALETTES[ci % len(_UNI_PALETTES)],
+                    })
 
-            # Pre-extract compare data for all files
-            _csep = []
-            for ci, cd in enumerate(_cmp_datasets):
-                cprimary = cd['plot_unis'][0]
-                cpdata   = cd['all_uni'][cprimary]
-                cs_c  = cpdata['s']
-                if normalize_s and float(cs_c[-1]) > 0:
-                    cs_c = cs_c / float(cs_c[-1])
-                cbp_raw = cpdata.get('beam_params', {})
-                _csep.append({
-                    'label':  cd['label'],
-                    'code':   cd['code'],
-                    'pdata':  cpdata,
-                    's':      cs_c,
-                    'ba':     cpdata['beta_a'],   'bb': cpdata['beta_b'],
-                    'ex':     cpdata['eta_x'],    'ey': cpdata['eta_y'],
-                    'al_a':   cpdata.get('alpha_a', np.zeros_like(cs_c)),
-                    'al_b':   cpdata.get('alpha_b', np.zeros_like(cs_c)),
-                    'ox':     cpdata['orbit_x'],  'oy': cpdata['orbit_y'],
-                    'pa':     cpdata['phi_a'],    'pb': cpdata['phi_b'],
-                    'elems':  cpdata['elements'],
-                    'bp': {
-                        'emit_x':   emit_x   if emit_x   is not None else cbp_raw.get('emit_x',   0.0),
-                        'emit_y':   emit_y   if emit_y   is not None else cbp_raw.get('emit_y',   0.0),
-                        'sigma_dp': sigma_dp if sigma_dp is not None else cbp_raw.get('sigma_dp', 0.0),
-                        'n_sigma':  float(n_sigma) if n_sigma is not None else 1.0,
-                        'alpha_a':  cpdata.get('alpha_a', np.zeros_like(cs_c)),
-                        'alpha_b':  cpdata.get('alpha_b', np.zeros_like(cs_c)),
-                    },
-                    'pal':    _UNI_PALETTES[ci % len(_UNI_PALETTES)],
-                })
+                def _make_group_fig(n_group_rows, titles, specs, heights, lkw_extra=None):
+                    """Build a small make_subplots figure for one panel group."""
+                    gv = 0.06
+                    gfig = make_subplots(
+                        rows=n_group_rows, cols=1, shared_xaxes=True,
+                        row_heights=heights, vertical_spacing=gv,
+                        subplot_titles=titles if show_titles else [''] * len(titles), specs=specs)
+                    gh = 120 + n_group_rows * 200
+                    glkw = dict(height=gh, hovermode='closest',
+                                xaxis=dict(domain=[0.0, x_domain[1]]))
+                    for ri in range(2, n_group_rows + 1):
+                        glkw[f'xaxis{ri}'] = dict(domain=[0.0, x_domain[1]])
+                    if lkw_extra:
+                        glkw.update(lkw_extra)
+                    gfig.update_layout(**glkw)
+                    return gfig
 
-            def _make_group_fig(n_group_rows, titles, specs, heights, lkw_extra=None):
-                """Build a small make_subplots figure for one panel group."""
-                gv = 0.06
-                gfig = make_subplots(
-                    rows=n_group_rows, cols=1, shared_xaxes=True,
-                    row_heights=heights, vertical_spacing=gv,
-                    subplot_titles=titles if show_titles else [''] * len(titles), specs=specs)
-                gh = 120 + n_group_rows * 200
-                glkw = dict(height=gh, hovermode='closest',
-                            xaxis=dict(domain=[0.0, x_domain[1]]))
-                for ri in range(2, n_group_rows + 1):
-                    glkw[f'xaxis{ri}'] = dict(domain=[0.0, x_domain[1]])
-                if lkw_extra:
-                    glkw.update(lkw_extra)
-                gfig.update_layout(**glkw)
-                return gfig
+                n_grp = 1 + len(_csep)  # primary + compare files
+                grp_h = [1.0 / n_grp] * n_grp
 
-            n_grp = 1 + len(_csep)  # primary + compare files
-            grp_h = [1.0 / n_grp] * n_grp
-
-            # ── Floor plan group ──────────────────────────────────────────────
-            if include_floor:
-                fp_titles = [''] * n_grp  # no per-row titles — legend identifies each row
-                fp_specs  = [[{'secondary_y': False}]] * n_grp
-                # Valid Plotly legend names: 'legend' (first), 'legend2', 'legend3', ...
-                # Each row gets two legend slots: fp_icons and element traces
-                # Row 0 (primary):  fp_legend='legend',  legend='legend2'
-                # Row 1 (compare1): fp_legend='legend3', legend='legend4'
-                # Row 2 (compare2): fp_legend='legend5', legend='legend6'  etc.
-                fp_lkw = {}
-                for fi in range(n_grp):
-                    y_pos = 1.0 - fi / n_grp
-                    fp_leg_name = 'legend' if fi == 0 else f'legend{fi*2+1}'
-                    el_leg_name = f'legend{fi*2+2}'
-                    fp_lkw[fp_leg_name] = dict(x=0.87, xanchor='left', y=y_pos,
-                        yanchor='top', itemsizing='constant', bgcolor='rgba(0,0,0,0)')
-                    fp_lkw[el_leg_name] = dict(x=0.87, xanchor='left', y=y_pos,
-                        yanchor='top', itemsizing='constant', bgcolor='rgba(0,0,0,0)')
-                fp_fig = _make_group_fig(n_grp, fp_titles, fp_specs, grp_h, fp_lkw)
-                # Primary floor row — fp icons go to 'legend', traces to 'legend2'
-                _build_floor_plan(fp_fig, elements, _primary_xz_height, flip_bend,
-                                  row=1, legend_name='legend2', fp_legend_name='legend',
-                                  elem_colors=elem_colors)
-                fp_fig.update_xaxes(title_text='Z (m)', row=1, col=1)
-                fp_fig.update_yaxes(title_text='X (m)', row=1, col=1)
-                # Compare floor rows — each gets its own pair of legend slots
-                for ri, c in enumerate(_csep, start=2):
-                    cxz_h, _, cxz_rng, _ = _floor_heights(c['elems'], c['pdata'])
-                    fp_leg_name = f'legend{(ri-1)*2+1}'
-                    el_leg_name = f'legend{(ri-1)*2+2}'
-                    _build_floor_plan(fp_fig, c['elems'], cxz_h, flip_bend,
-                                      row=ri,
-                                      legend_name=el_leg_name,
-                                      fp_legend_name=fp_leg_name,
+                # ── Floor plan group ──────────────────────────────────────────────
+                if include_floor:
+                    fp_titles = [''] * n_grp  # no per-row titles — legend identifies each row
+                    fp_specs  = [[{'secondary_y': False}]] * n_grp
+                    # Valid Plotly legend names: 'legend' (first), 'legend2', 'legend3', ...
+                    # Each row gets two legend slots: fp_icons and element traces
+                    # Row 0 (primary):  fp_legend='legend',  legend='legend2'
+                    # Row 1 (compare1): fp_legend='legend3', legend='legend4'
+                    # Row 2 (compare2): fp_legend='legend5', legend='legend6'  etc.
+                    fp_lkw = {}
+                    for fi in range(n_grp):
+                        y_pos = 1.0 - fi / n_grp
+                        fp_leg_name = 'legend' if fi == 0 else f'legend{fi*2+1}'
+                        el_leg_name = f'legend{fi*2+2}'
+                        fp_lkw[fp_leg_name] = dict(x=0.87, xanchor='left', y=y_pos,
+                            yanchor='top', itemsizing='constant', bgcolor='rgba(0,0,0,0)')
+                        fp_lkw[el_leg_name] = dict(x=0.87, xanchor='left', y=y_pos,
+                            yanchor='top', itemsizing='constant', bgcolor='rgba(0,0,0,0)')
+                    fp_fig = _make_group_fig(n_grp, fp_titles, fp_specs, grp_h, fp_lkw)
+                    # Primary floor row — fp icons go to 'legend', traces to 'legend2'
+                    _build_floor_plan(fp_fig, elements, _primary_xz_height, flip_bend,
+                                      row=1, legend_name='legend2', fp_legend_name='legend',
                                       elem_colors=elem_colors)
-                    fp_fig.update_xaxes(title_text='Z (m)', row=ri, col=1)
-                    fp_fig.update_yaxes(title_text='X (m)', row=ri, col=1,
-                                        **({'range': cxz_rng} if cxz_rng else {}))
-                fp_fig.update_layout(title=dict(text='Floor Plan', x=0.5, xanchor='center'))
-                if not hasattr(fig, '_compare_figs'): fig._compare_figs = []
-                fig._compare_figs.append(('__floor__', fp_fig))
+                    fp_fig.update_xaxes(title_text='Z (m)', row=1, col=1)
+                    fp_fig.update_yaxes(title_text='X (m)', row=1, col=1)
+                    if equal_aspect: _lock_floor_aspect(fp_fig, 1)
+                    # Compare floor rows — each gets its own pair of legend slots
+                    for ri, c in enumerate(_csep, start=2):
+                        cxz_h, _, cxz_rng, _ = _floor_heights(c['elems'], c['pdata'])
+                        fp_leg_name = f'legend{(ri-1)*2+1}'
+                        el_leg_name = f'legend{(ri-1)*2+2}'
+                        _build_floor_plan(fp_fig, c['elems'], cxz_h, flip_bend,
+                                          row=ri,
+                                          legend_name=el_leg_name,
+                                          fp_legend_name=fp_leg_name,
+                                          elem_colors=elem_colors)
+                        fp_fig.update_xaxes(title_text='Z (m)', row=ri, col=1)
+                        fp_fig.update_yaxes(title_text='X (m)', row=ri, col=1,
+                                            **({'range': cxz_rng} if cxz_rng else {}))
+                        if equal_aspect: _lock_floor_aspect(fp_fig, ri)
+                    fp_fig.update_layout(title=dict(text='Floor Plan', x=0.5, xanchor='center'))
+                    if not hasattr(fig, '_compare_figs'): fig._compare_figs = []
+                    fig._compare_figs.append(('__floor__', fp_fig))
 
-            # ── Data panel groups ─────────────────────────────────────────────
-            for pi, p in enumerate(panels):
-                ptitle  = p.get('name', 'Custom') if isinstance(p, dict) else panel_title(p)
-                has_sec = (p == 'twiss') or \
-                    (isinstance(p, dict) and bool(p.get('y2'))) or \
-                    (isinstance(p, dict) and p.get('type') == 'expr' and bool(p.get('y2_expr','').strip()))
-                pg_titles = [''] * n_grp  # no per-row titles
-                pg_specs  = [[{'secondary_y': has_sec}]] * n_grp
-                pg_lkw    = {}
-                for li in range(n_grp):
-                    leg_name = 'legend' if li == 0 else f'legend{li+1}'
-                    pg_lkw[leg_name] = dict(
-                        x=LEGEND_X, xanchor=LEGEND_XA,
-                        y=1.0 - li / n_grp, yanchor='top',
-                        itemsizing='constant', bgcolor='rgba(0,0,0,0)')
-                pg_fig = _make_group_fig(n_grp, pg_titles, pg_specs, grp_h, pg_lkw)
-                pg_fig.update_layout(title=dict(text=ptitle, x=0.5, xanchor='center'))
-                # Primary panel — use 'legend' (bare) for first legend
-                _build_panel3_uni(pg_fig, p, s, ba, bb, ex, ey,
-                                  ox, oy, pa, pb, al_a, al_b, bp_full,
-                                  row=1, legend_name='legend',
-                                  uni_label='primary', palette=_UNI_PALETTES[0])
-                pg_fig.update_yaxes(title_text=_ytitle_l.get(p,'') if isinstance(p,str) else p.get('name',''),
-                                    row=1, col=1)
-                # Compare panels
-                for ri, c in enumerate(_csep, start=2):
-                    cleg = f'legend{ri}'
-                    if isinstance(p, dict) and p.get('type') == 'expr':
-                        _build_expr_panel(pg_fig, p, c['pdata'], c['code'], c['s'],
-                                          row=ri, legend_name=cleg, log_fn=log_fn)
-                    else:
-                        _build_panel3_uni(pg_fig, p, c['s'], c['ba'], c['bb'],
-                                          c['ex'], c['ey'], c['ox'], c['oy'],
-                                          c['pa'], c['pb'], c['al_a'], c['al_b'], c['bp'],
-                                          row=ri, legend_name=cleg,
-                                          uni_label=c['label'], palette=c['pal'])
-                    pg_fig.update_yaxes(
-                        title_text=_ytitle_l.get(p,'') if isinstance(p,str) else p.get('name',''),
-                        row=ri, col=1)
-                # s-axis label on last row
-                pg_fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
-                                    row=n_grp, col=1)
-                if not hasattr(fig, '_compare_figs'): fig._compare_figs = []
-                fig._compare_figs.append((f'__panel_{pi}__', pg_fig))
+                # ── Data panel groups ─────────────────────────────────────────────
+                for pi, p in enumerate(panels):
+                    ptitle  = p.get('name', 'Custom') if isinstance(p, dict) else panel_title(p)
+                    has_sec = (p == 'twiss') or \
+                        (isinstance(p, dict) and bool(p.get('y2'))) or \
+                        (isinstance(p, dict) and p.get('type') == 'expr' and bool(p.get('y2_expr','').strip()))
+                    pg_titles = [''] * n_grp  # no per-row titles
+                    pg_specs  = [[{'secondary_y': has_sec}]] * n_grp
+                    pg_lkw    = {}
+                    for li in range(n_grp):
+                        leg_name = 'legend' if li == 0 else f'legend{li+1}'
+                        pg_lkw[leg_name] = dict(
+                            x=LEGEND_X, xanchor=LEGEND_XA,
+                            y=1.0 - li / n_grp, yanchor='top',
+                            itemsizing='constant', bgcolor='rgba(0,0,0,0)')
+                    pg_fig = _make_group_fig(n_grp, pg_titles, pg_specs, grp_h, pg_lkw)
+                    pg_fig.update_layout(title=dict(text=ptitle, x=0.5, xanchor='center'))
+                    # Primary panel — use 'legend' (bare) for first legend
+                    _build_panel3_uni(pg_fig, p, s, ba, bb, ex, ey,
+                                      ox, oy, pa, pb, al_a, al_b, bp_full,
+                                      row=1, legend_name='legend',
+                                      uni_label='primary', palette=_UNI_PALETTES[0])
+                    pg_fig.update_yaxes(title_text=_ytitle_l.get(p,'') if isinstance(p,str) else p.get('name',''),
+                                        row=1, col=1)
+                    # Compare panels
+                    for ri, c in enumerate(_csep, start=2):
+                        cleg = f'legend{ri}'
+                        if isinstance(p, dict) and p.get('type') == 'expr':
+                            _build_expr_panel(pg_fig, p, c['pdata'], c['code'], c['s'],
+                                              row=ri, legend_name=cleg, log_fn=log_fn)
+                        else:
+                            _build_panel3_uni(pg_fig, p, c['s'], c['ba'], c['bb'],
+                                              c['ex'], c['ey'], c['ox'], c['oy'],
+                                              c['pa'], c['pb'], c['al_a'], c['al_b'], c['bp'],
+                                              row=ri, legend_name=cleg,
+                                              uni_label=c['label'], palette=c['pal'])
+                        pg_fig.update_yaxes(
+                            title_text=_ytitle_l.get(p,'') if isinstance(p,str) else p.get('name',''),
+                            row=ri, col=1)
+                    # s-axis label on last row
+                    pg_fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
+                                        row=n_grp, col=1)
+                    if not hasattr(fig, '_compare_figs'): fig._compare_figs = []
+                    fig._compare_figs.append((f'__panel_{pi}__', pg_fig))
 
-            # ── Beamline bar group ────────────────────────────────────────────
-            if include_bar:
-                bar_titles = [''] * n_grp  # no per-row titles
-                bar_specs  = [[{'secondary_y': False}]] * n_grp
-                bar_h_vals = [1.0 / n_grp] * n_grp
-                bar_fig    = _make_group_fig(n_grp, bar_titles, bar_specs, bar_h_vals)
-                bar_fig.update_layout(height=80 + n_grp * 100,
-                                      title=dict(text='Beamline', x=0.5, xanchor='center'))
-                _build_layout_bar(bar_fig, elements, show_element_labels, row=1,
-                                  show_markers=show_markers_bar, bar_lite=bar_lite,
-                                  elem_colors=elem_colors)
-                bar_fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
-                                     row=1, col=1)
-                bar_fig.update_yaxes(title_text='', showticklabels=False,
-                                     range=[-0.4, 0.4], row=1, col=1)
-                for ri, c in enumerate(_csep, start=2):
-                    _build_layout_bar(bar_fig, c['elems'], show_element_labels, row=ri,
+                # ── Beamline bar group ────────────────────────────────────────────
+                if include_bar:
+                    bar_titles = [''] * n_grp  # no per-row titles
+                    bar_specs  = [[{'secondary_y': False}]] * n_grp
+                    bar_h_vals = [1.0 / n_grp] * n_grp
+                    bar_fig    = _make_group_fig(n_grp, bar_titles, bar_specs, bar_h_vals)
+                    bar_fig.update_layout(height=80 + n_grp * 100,
+                                          title=dict(text='Beamline', x=0.5, xanchor='center'))
+                    _build_layout_bar(bar_fig, elements, show_element_labels, row=1,
                                       show_markers=show_markers_bar, bar_lite=bar_lite,
-                                      elem_colors=elem_colors)
+                                      elem_colors=elem_colors, elem_ratio=bar_elem_ratio)
+                    bar_fig.update_xaxes(title_text='s (m)' if not normalize_s else 's/s_max',
+                                         row=1, col=1)
                     bar_fig.update_yaxes(title_text='', showticklabels=False,
-                                         range=[-0.4, 0.4], row=ri, col=1)
-                if not hasattr(fig, '_compare_figs'): fig._compare_figs = []
-                fig._compare_figs.append(('__bar__', bar_fig))
+                                         range=[-0.4, 0.4], row=1, col=1)
+                    for ri, c in enumerate(_csep, start=2):
+                        _build_layout_bar(bar_fig, c['elems'], show_element_labels, row=ri,
+                                          show_markers=show_markers_bar, bar_lite=bar_lite,
+                                          elem_colors=elem_colors, elem_ratio=bar_elem_ratio)
+                        bar_fig.update_yaxes(title_text='', showticklabels=False,
+                                             range=[-0.4, 0.4], row=ri, col=1)
+                    if not hasattr(fig, '_compare_figs'): fig._compare_figs = []
+                    fig._compare_figs.append(('__bar__', bar_fig))
 
-        # ── Difference mode: one panel per optics quantity ───────────────────
-        if compare_mode in ('difference', 'difference%') and _cmp_datasets:
-            _log(f"[compare] Building difference panels for {len(_cmp_datasets)} file(s)...")
-            is_pct = compare_mode == 'difference%'
+            # ── Difference mode: one panel per optics quantity ───────────────────
+            if compare_mode in ('difference', 'difference%') and _cmp_datasets:
+                _log(f"[compare] Building difference panels for {len(_cmp_datasets)} file(s)...")
+                is_pct = compare_mode == 'difference%'
 
-            # Quantities to difference: (array_key, label, unit)
-            _DIFF_QUANTITIES = [
-                ('beta_a',  'Δβₓ',   'm'   if not is_pct else '%'),
-                ('beta_b',  'Δβᵧ',   'm'   if not is_pct else '%'),
-                ('eta_x',   'Δηₓ',   'm'   if not is_pct else '%'),
-                ('eta_y',   'Δηᵧ',   'm'   if not is_pct else '%'),
-                ('alpha_a', 'Δαₓ',   ''    if not is_pct else '%'),
-                ('alpha_b', 'Δαᵧ',   ''    if not is_pct else '%'),
-                ('orbit_x', 'Δx',    'm'   if not is_pct else '%'),
-                ('orbit_y', 'Δy',    'm'   if not is_pct else '%'),
-                ('phi_a',   'Δμₓ',   ''    if not is_pct else '%'),
-                ('phi_b',   'Δμᵧ',   ''    if not is_pct else '%'),
-            ]
+                # Quantities to difference: (array_key, label, unit)
+                _DIFF_QUANTITIES = [
+                    ('beta_a',  'Δβₓ',   'm'   if not is_pct else '%'),
+                    ('beta_b',  'Δβᵧ',   'm'   if not is_pct else '%'),
+                    ('eta_x',   'Δηₓ',   'm'   if not is_pct else '%'),
+                    ('eta_y',   'Δηᵧ',   'm'   if not is_pct else '%'),
+                    ('alpha_a', 'Δαₓ',   ''    if not is_pct else '%'),
+                    ('alpha_b', 'Δαᵧ',   ''    if not is_pct else '%'),
+                    ('orbit_x', 'Δx',    'm'   if not is_pct else '%'),
+                    ('orbit_y', 'Δy',    'm'   if not is_pct else '%'),
+                    ('phi_a',   'Δμₓ',   ''    if not is_pct else '%'),
+                    ('phi_b',   'Δμᵧ',   ''    if not is_pct else '%'),
+                ]
 
-            nd = len(_DIFF_QUANTITIES)
-            dv_spacing = 0.05
-            dn_gaps    = nd - 1
-            dpanel_h   = (1.0 - dv_spacing * dn_gaps) / nd
-            d_row_heights = [dpanel_h] * nd
-            d_titles = []
-            for key, lbl, unit in _DIFF_QUANTITIES:
-                suffix = ' (%)' if is_pct else (f' ({unit})' if unit else '')
-                d_titles.append(f'{lbl}{suffix}')
+                nd = len(_DIFF_QUANTITIES)
+                dv_spacing = 0.05
+                dn_gaps    = nd - 1
+                dpanel_h   = (1.0 - dv_spacing * dn_gaps) / nd
+                d_row_heights = [dpanel_h] * nd
+                d_titles = []
+                for key, lbl, unit in _DIFF_QUANTITIES:
+                    suffix = ' (%)' if is_pct else (f' ({unit})' if unit else '')
+                    d_titles.append(f'{lbl}{suffix}')
 
-            dfig = make_subplots(
-                rows=nd, cols=1, shared_xaxes=True,
-                row_heights=d_row_heights, vertical_spacing=dv_spacing,
-                subplot_titles=d_titles if show_titles else [''] * len(d_titles),
-                specs=[[{'secondary_y': False}]] * nd,
-            )
+                dfig = make_subplots(
+                    rows=nd, cols=1, shared_xaxes=True,
+                    row_heights=d_row_heights, vertical_spacing=dv_spacing,
+                    subplot_titles=d_titles if show_titles else [''] * len(d_titles),
+                    specs=[[{'secondary_y': False}]] * nd,
+                )
 
-            _DIFF_PALETTE = ['#0a84ff','#ff453a','#30d158','#ff9f0a',
-                             '#5e5ce6','#64d2ff','#ff375f','#ffd60a']
+                _DIFF_PALETTE = ['#0a84ff','#ff453a','#30d158','#ff9f0a',
+                                 '#5e5ce6','#64d2ff','#ff375f','#ffd60a']
 
-            for ci, cd in enumerate(_cmp_datasets):
-                clabel   = cd['label']
-                cprimary = cd['plot_unis'][0]
-                cpdata   = cd['all_uni'][cprimary]
-                cs_cmp   = cpdata['s']
-                # Normalize s if requested
-                if normalize_s:
-                    s_plot  = s / float(s[-1]) if float(s[-1]) > 0 else s
-                    sc_plot = cs_cmp / float(cs_cmp[-1]) if float(cs_cmp[-1]) > 0 else cs_cmp
-                else:
-                    s_plot  = s
-                    sc_plot = cs_cmp
-
-                color = _DIFF_PALETTE[ci % len(_DIFF_PALETTE)]
-                dleg  = f'legend{ci+1}'
-
-                for row_i, (key, lbl, unit) in enumerate(_DIFF_QUANTITIES, start=1):
-                    p_arr = _pdata.get(key, np.zeros_like(s))
-                    c_arr = cpdata.get(key, np.zeros_like(cs_cmp))
-                    # Interpolate compare onto primary s-grid
-                    c_interp = np.interp(s_plot, sc_plot, c_arr)
-                    if is_pct:
-                        with np.errstate(invalid='ignore', divide='ignore'):
-                            diff = np.where(np.abs(p_arr) > 1e-12,
-                                            (p_arr - c_interp) / np.abs(p_arr) * 100.0,
-                                            np.nan)
+                for ci, cd in enumerate(_cmp_datasets):
+                    clabel   = cd['label']
+                    cprimary = cd['plot_unis'][0]
+                    cpdata   = cd['all_uni'][cprimary]
+                    cs_cmp   = cpdata['s']
+                    # Normalize s if requested
+                    if normalize_s:
+                        s_plot  = s / float(s[-1]) if float(s[-1]) > 0 else s
+                        sc_plot = cs_cmp / float(cs_cmp[-1]) if float(cs_cmp[-1]) > 0 else cs_cmp
                     else:
-                        diff = p_arr - c_interp
+                        s_plot  = s
+                        sc_plot = cs_cmp
 
-                    trace_name = f'{lbl} ({clabel})'
-                    dfig.add_trace(go.Scatter(
-                        x=s_plot, y=diff, mode='lines',
-                        name=trace_name, legendgroup=trace_name,
-                        line=dict(color=color, width=1.5),
-                        hovertemplate=f's=%{{x:.3f}} m<br>{lbl}=%{{y:.6g}}<extra>{clabel}</extra>',
-                        legend=dleg,
-                    ), row=row_i, col=1)
+                    color = _DIFF_PALETTE[ci % len(_DIFF_PALETTE)]
+                    dleg  = f'legend{ci+1}'
 
-                    # Zero reference line
-                    dfig.add_hline(y=0, line=dict(color='gray', width=0.8, dash='dot'),
-                                   row=row_i, col=1)
+                    for row_i, (key, lbl, unit) in enumerate(_DIFF_QUANTITIES, start=1):
+                        p_arr = _pdata.get(key, np.zeros_like(s))
+                        c_arr = cpdata.get(key, np.zeros_like(cs_cmp))
+                        # Interpolate compare onto primary s-grid
+                        c_interp = np.interp(s_plot, sc_plot, c_arr)
+                        if is_pct:
+                            with np.errstate(invalid='ignore', divide='ignore'):
+                                diff = np.where(np.abs(p_arr) > 1e-12,
+                                                (p_arr - c_interp) / np.abs(p_arr) * 100.0,
+                                                np.nan)
+                        else:
+                            diff = p_arr - c_interp
 
-                    if row_i == nd:
-                        dfig.update_xaxes(
-                            title_text='s (m)' if not normalize_s else 's/s_max',
+                        trace_name = f'{lbl} ({clabel})'
+                        dfig.add_trace(go.Scatter(
+                            x=s_plot, y=diff, mode='lines',
+                            name=trace_name, legendgroup=trace_name,
+                            line=dict(color=color, width=1.5),
+                            hovertemplate=f's=%{{x:.3f}} m<br>{lbl}=%{{y:.6g}}<extra>{clabel}</extra>',
+                            legend=dleg,
+                        ), row=row_i, col=1)
+
+                        # Zero reference line
+                        dfig.add_hline(y=0, line=dict(color='gray', width=0.8, dash='dot'),
+                                       row=row_i, col=1)
+
+                        if row_i == nd:
+                            dfig.update_xaxes(
+                                title_text='s (m)' if not normalize_s else 's/s_max',
+                                row=row_i, col=1)
+                        dfig.update_yaxes(
+                            title_text=f'{lbl} ({unit})' if unit else lbl,
                             row=row_i, col=1)
-                    dfig.update_yaxes(
-                        title_text=f'{lbl} ({unit})' if unit else lbl,
-                        row=row_i, col=1)
 
-                # Legend positioning
-                dfig_lkw = {}
-                dfig_lkw[f'legend{ci+1}'] = dict(
-                    x=1.02, xanchor='left', y=1.0, yanchor='top',
-                    itemsizing='constant', bgcolor='rgba(0,0,0,0)')
-                dfig.update_layout(**dfig_lkw)
+                    # Legend positioning
+                    dfig_lkw = {}
+                    dfig_lkw[f'legend{ci+1}'] = dict(
+                        x=1.02, xanchor='left', y=1.0, yanchor='top',
+                        itemsizing='constant', bgcolor='rgba(0,0,0,0)')
+                    dfig.update_layout(**dfig_lkw)
 
-            # Height
-            dfig_h = 200 + nd * 180
-            dfig.update_layout(height=dfig_h, hovermode='closest',
-                               title=dict(
-                                   text=f'Optics Differences{"  (%)" if is_pct else ""}'
-                                        + (f' — {title}' if title else ''),
-                                   x=0.5, xanchor='center'))
+                # Height
+                dfig_h = 200 + nd * 180
+                dfig.update_layout(height=dfig_h, hovermode='closest',
+                                   title=dict(
+                                       text=f'Optics Differences{"  (%)" if is_pct else ""}'
+                                            + (f' — {title}' if title else ''),
+                                       x=0.5, xanchor='center'))
 
-            if not hasattr(fig, '_compare_figs'):
-                fig._compare_figs = []
-            fig._compare_figs.append(('Differences', dfig))
+                if not hasattr(fig, '_compare_figs'):
+                    fig._compare_figs = []
+                fig._compare_figs.append(('Differences', dfig))
+            return fig
 
-    # ── Apply theme + save ────────────────────────────────────────────────────
-    _prog(88, 'Applying theme...')
-    _apply(fig)
+        fig = _render_panels_stack()
 
-    # Apply global font sizes if specified
-    if font_sizes:
-        _fs = font_sizes
-        ax_lbl  = _fs.get('axis_label', None)
-        tick_sz = _fs.get('tick',       None)
-        ttl_sz  = _fs.get('title',      None)
-        leg_sz  = _fs.get('legend',     None)
-        if ax_lbl:
-            fig.update_xaxes(title_font=dict(size=ax_lbl))
-            fig.update_yaxes(title_font=dict(size=ax_lbl))
-        if tick_sz:
-            fig.update_xaxes(tickfont=dict(size=tick_sz))
-            fig.update_yaxes(tickfont=dict(size=tick_sz))
-        if ttl_sz and show_titles:
-            fig.update_layout(
-                title_font=dict(size=ttl_sz),
-                annotations=[dict(a, font=dict(size=ttl_sz))
-                              if a.get('text','') and not a.get('showarrow', True)
-                                 and a.get('xref','') == 'paper'
-                              else a
-                              for a in fig.to_dict().get('layout', {}).get('annotations', [])])
-        if leg_sz:
-            fig.update_layout(legend=dict(font=dict(size=leg_sz)))
+    def _finalize(fig):
+        # ── Apply theme + save ────────────────────────────────────────────────────
+        _prog(88, 'Applying theme...')
+        if hide_labels:
+            fig.update_xaxes(title_text='')
+            fig.update_yaxes(title_text='')
+        _apply(fig)
 
-    # Apply theme to compare sub-figures too
-    if hasattr(fig, '_compare_figs'):
-        for _, cfig in fig._compare_figs:
-            _apply(cfig)
+        # Apply global font sizes if specified
+        if font_sizes:
+            _fs = font_sizes
+            ax_lbl  = _fs.get('axis_label', None)
+            tick_sz = _fs.get('tick',       None)
+            ttl_sz  = _fs.get('title',      None)
+            leg_sz  = _fs.get('legend',     None)
+            if ax_lbl:
+                fig.update_xaxes(title_font=dict(size=ax_lbl))
+                fig.update_yaxes(title_font=dict(size=ax_lbl))
+            if tick_sz:
+                fig.update_xaxes(tickfont=dict(size=tick_sz))
+                fig.update_yaxes(tickfont=dict(size=tick_sz))
+            if ttl_sz and show_titles:
+                fig.update_layout(
+                    title_font=dict(size=ttl_sz),
+                    annotations=[dict(a, font=dict(size=ttl_sz))
+                                  if a.get('text','') and not a.get('showarrow', True)
+                                     and a.get('xref','') == 'paper'
+                                  else a
+                                  for a in fig.to_dict().get('layout', {}).get('annotations', [])])
+            if leg_sz:
+                # Update ALL legend keys including named ones (legend1, legend1001 etc)
+                # Use to_dict() which surfaces all set keys including high-numbered ones
+                _leg_upd = {_lk: dict(font=dict(size=leg_sz))
+                            for _lk in fig.to_dict().get('layout', {})
+                            if _lk.startswith('legend')}
+                if _leg_upd:
+                    fig.update_layout(**_leg_upd)
+                else:
+                    fig.update_layout(legend=dict(font=dict(size=leg_sz)))
+
+        # Apply theme to compare sub-figures too
+        if hasattr(fig, '_compare_figs'):
+            for _, cfig in fig._compare_figs:
+                _apply(cfig)
 
 
-    # Fix alignment: disable automargin on all yaxes, and copy domain from
-    # primary to secondary yaxes where domain is None (secondary y-axes from make_subplots)
-    _yax_domains = {}
-    for ax in sorted(fig.layout):
-        if ax.startswith('yaxis'):
-            ya = fig.layout[ax]
-            ya.automargin = False
-            d = getattr(ya, 'domain', None)
-            if d and d[0] is not None:
-                _yax_domains[ax] = d
-    # Copy domain to any yaxis with domain=None using overlaying reference
-    for ax in sorted(fig.layout):
-        if ax.startswith('yaxis'):
-            ya = fig.layout[ax]
-            d = getattr(ya, 'domain', None)
-            if not d or d[0] is None:
-                overlay = getattr(ya, 'overlaying', None)
-                if overlay:
-                    ref_ax = 'yaxis' if overlay == 'y' else f'yaxis{overlay[1:]}'
-                    if ref_ax in _yax_domains:
-                        ya.domain = _yax_domains[ref_ax]
-    # Force all xaxes to the same physical domain so floor plan and data panels
-    # have identical plot area width
-    for ax in sorted(fig.layout):
-        if ax.startswith('xaxis'):
-            fig.layout[ax].domain = x_domain
-    fig.update_layout(margin=dict(l=100))
-    _prog(93, 'Writing HTML...')
-    if hasattr(fig, '_compare_figs') and fig._compare_figs:
-        import plotly.io as pio
-        # In separate mode with interleaved groups, skip the primary fig —
-        # each group already contains the primary row.
-        if compare_mode == 'separate' and layout != 'floor':
-            html_parts = []
-            first = True
-            for clabel, cfig in fig._compare_figs:
-                html_parts.append(pio.to_html(cfig, full_html=False,
-                                              include_plotlyjs='cdn' if first else False))
-                first = False
+        # Fix alignment: disable automargin on all yaxes, and copy domain from
+        # primary to secondary yaxes where domain is None (secondary y-axes from make_subplots)
+        _yax_domains = {}
+        for ax in sorted(fig.layout):
+            if ax.startswith('yaxis'):
+                ya = fig.layout[ax]
+                ya.automargin = False
+                d = getattr(ya, 'domain', None)
+                if d and d[0] is not None:
+                    _yax_domains[ax] = d
+        # Copy domain to any yaxis with domain=None using overlaying reference
+        for ax in sorted(fig.layout):
+            if ax.startswith('yaxis'):
+                ya = fig.layout[ax]
+                d = getattr(ya, 'domain', None)
+                if not d or d[0] is None:
+                    overlay = getattr(ya, 'overlaying', None)
+                    if overlay:
+                        ref_ax = 'yaxis' if overlay == 'y' else f'yaxis{overlay[1:]}'
+                        if ref_ax in _yax_domains:
+                            ya.domain = _yax_domains[ref_ax]
+        # Force all xaxes to the same physical domain so floor plan and data panels
+        # have identical plot area width
+        for ax in sorted(fig.layout):
+            if ax.startswith('xaxis'):
+                fig.layout[ax].domain = x_domain
+        fig.update_layout(margin=dict(l=100))
+        _prog(93, 'Writing HTML...')
+        if hasattr(fig, '_compare_figs') and fig._compare_figs:
+            import plotly.io as pio
+            # In separate mode with interleaved groups, skip the primary fig —
+            # each group already contains the primary row.
+            if compare_mode == 'separate' and layout != 'floor':
+                html_parts = []
+                first = True
+                for clabel, cfig in fig._compare_figs:
+                    html_parts.append(pio.to_html(cfig, full_html=False,
+                                                  include_plotlyjs='cdn' if first else False))
+                    first = False
+            else:
+                html_parts = [pio.to_html(fig, full_html=False, include_plotlyjs='cdn')]
+                for clabel, cfig in fig._compare_figs:
+                    html_parts.append(pio.to_html(cfig, full_html=False, include_plotlyjs=False))
+            combined = (
+                '<!DOCTYPE html><html><head><meta charset="utf-8">'
+                f'<title>{title or "RanOptics — Optics Comparison"}</title>'
+                '<style>body{{margin:0;padding:8px;background:#fff;}}'
+                '.ran-sep{{border-top:2px solid #ccc;margin:16px 0;}}</style>'
+                '</head><body>'
+                + '<div class="ran-sep"></div>'.join(html_parts)
+                + '</body></html>'
+            )
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(combined)
         else:
-            html_parts = [pio.to_html(fig, full_html=False, include_plotlyjs='cdn')]
-            for clabel, cfig in fig._compare_figs:
-                html_parts.append(pio.to_html(cfig, full_html=False, include_plotlyjs=False))
-        combined = (
-            '<!DOCTYPE html><html><head><meta charset="utf-8">'
-            f'<title>{title or "RanOptics — Optics Comparison"}</title>'
-            '<style>body{{margin:0;padding:8px;background:#fff;}}'
-            '.ran-sep{{border-top:2px solid #ccc;margin:16px 0;}}</style>'
-            '</head><body>'
-            + '<div class="ran-sep"></div>'.join(html_parts)
-            + '</body></html>'
-        )
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(combined)
-    else:
-        fig.write_html(output_file)
-    _prog(100, 'Done')
-    _log(f"✓ Saved HTML → {output_file}")
-    base = output_file.rsplit('.', 1)[0]
-    if save_png:
-        import time; fig.write_image('/tmp/warmup.png', width=100, height=100)
-        time.sleep(1); pf = base + '.png'
-        fig.write_image(pf, width=1600, height=1100, scale=dpi/96)
-        time.sleep(1); _log(f"✓ Saved PNG  → {pf}")
-    if save_pdf:
-        import time; pf = base + '.pdf'
-        fig.write_image(pf, width=1600, height=1100)
-        time.sleep(1); _log(f"✓ Saved PDF  → {pf}")
+            fig.write_html(output_file)
+        _prog(100, 'Done')
+        _log(f"✓ Saved HTML → {output_file}")
+        base = output_file.rsplit('.', 1)[0]
+        if save_png:
+            import time; fig.write_image('/tmp/warmup.png', width=100, height=100)
+            time.sleep(1); pf = base + '.png'
+            fig.write_image(pf, width=1600, height=1100, scale=dpi/96)
+            time.sleep(1); _log(f"✓ Saved PNG  → {pf}")
+        if save_pdf:
+            import time; pf = base + '.pdf'
+            fig.write_image(pf, width=1600, height=1100)
+            time.sleep(1); _log(f"✓ Saved PDF  → {pf}")
 
-    if save_csv:
-        import csv as _csv, os as _os
-        _csv_dir = _os.path.dirname(output_file) or '.'
-        _base = (csv_base or 'lattice').strip()
+        if save_csv:
+            import csv as _csv, os as _os
+            _csv_dir = _os.path.dirname(output_file) or '.'
+            _base = (csv_base or 'lattice').strip()
 
-        # Panel name -> short slug
-        def _slug(p):
-            if isinstance(p, dict): return p.get('name', 'custom').lower().replace(' ', '_')
-            return {'twiss':'twiss','beta':'beta','dispersion':'dispersion',
-                    'alpha':'alpha','orbit':'orbit','phase':'phase',
-                    'beamsize':'beamsize','summary':'summary','latdiff':'latdiff'}.get(p, str(p))
+            # Panel name -> short slug
+            def _slug(p):
+                if isinstance(p, dict): return p.get('name', 'custom').lower().replace(' ', '_')
+                return {'twiss':'twiss','beta':'beta','dispersion':'dispersion',
+                        'alpha':'alpha','orbit':'orbit','phase':'phase',
+                        'beamsize':'beamsize','summary':'summary','latdiff':'latdiff'}.get(p, str(p))
 
-        # Columns per panel type
-        _PANEL_COLS = {
-            'twiss':      ['s','beta_a','beta_b','eta_x','eta_y','alpha_a','alpha_b'],
-            'beta':       ['s','beta_a','beta_b'],
-            'dispersion': ['s','eta_x','eta_y'],
-            'alpha':      ['s','alpha_a','alpha_b'],
-            'orbit':      ['s','orbit_x','orbit_y'],
-            'phase':      ['s','phi_a','phi_b'],
-            'beamsize':   ['s','beta_a','beta_b','eta_x','eta_y'],
-        }
-        _COL_LABELS = {
-            's':'s(m)','beta_a':'betx(m)','beta_b':'bety(m)',
-            'eta_x':'etax(m)','eta_y':'etay(m)',
-            'alpha_a':'alfx','alpha_b':'alfy',
-            'orbit_x':'x(m)','orbit_y':'y(m)',
-            'phi_a':'mux','phi_b':'muy',
-        }
+            # Columns per panel type
+            _PANEL_COLS = {
+                'twiss':      ['s','beta_a','beta_b','eta_x','eta_y','alpha_a','alpha_b'],
+                'beta':       ['s','beta_a','beta_b'],
+                'dispersion': ['s','eta_x','eta_y'],
+                'alpha':      ['s','alpha_a','alpha_b'],
+                'orbit':      ['s','orbit_x','orbit_y'],
+                'phase':      ['s','phi_a','phi_b'],
+                'beamsize':   ['s','beta_a','beta_b','eta_x','eta_y'],
+            }
+            _COL_LABELS = {
+                's':'s(m)','beta_a':'betx(m)','beta_b':'bety(m)',
+                'eta_x':'etax(m)','eta_y':'etay(m)',
+                'alpha_a':'alfx','alpha_b':'alfy',
+                'orbit_x':'x(m)','orbit_y':'y(m)',
+                'phi_a':'mux','phi_b':'muy',
+            }
 
-        for p in panels:
-            slug = _slug(p)
-            if p == 'bar': continue  # no tabular data
+            for p in panels:
+                slug = _slug(p)
+                if p == 'bar': continue  # no tabular data
 
-            # ── latdiff: write 3 CSVs ──────────────────────────────────
-            if p == 'latdiff' and _cmp_datasets:
-                _puid  = _plot_unis[0]
-                _ea    = _all_uni_data[_puid]['elements']
-                _la    = _uni_labels.get(_puid, 'primary')
-                _cd    = _cmp_datasets[0]
-                _eb    = _cd['all_uni'][_cd['plot_unis'][0]]['elements']
-                _lb    = _cd['label']
-                _PHY   = {'sbend','quadrupole','sextupole','rfcavity','lcavity'}
-                _ma    = [e for e in _ea if e['key'].lower() in _PHY]
-                _mb    = [e for e in _eb if e['key'].lower() in _PHY]
-                if len(_ma) == len(_mb):
-                    # Strengths
-                    _fp = _os.path.join(_csv_dir, f"{_base}-latdiff-strengths.csv")
-                    with open(_fp, 'w', newline='') as f:
-                        w = _csv.writer(f)
-                        w.writerow(['#','name','type',
-                                    f'L_{_la}',f'L_{_lb}','dL',
-                                    f'k1_{_la}',f'k1_{_lb}','dk1',
-                                    f'k2_{_la}',f'k2_{_lb}','dk2'])
-                        for i,(ea,eb) in enumerate(zip(_ma,_mb)):
-                            w.writerow([i+1, ea['name'], ea['key'],
-                                        f"{ea['length']:.6f}", f"{eb['length']:.6f}",
-                                        f"{eb['length']-ea['length']:.6f}",
-                                        f"{ea.get('k1',0):.6f}", f"{eb.get('k1',0):.6f}",
-                                        f"{eb.get('k1',0)-ea.get('k1',0):.6f}",
-                                        f"{ea.get('k2',0):.6f}", f"{eb.get('k2',0):.6f}",
-                                        f"{eb.get('k2',0)-ea.get('k2',0):.6f}"])
-                    _log(f"✓ CSV → {_fp}")
-                    # Entry/Exit positions
-                    for suffix, k0, k1 in [('entry','flr_','0'), ('exit','flr_','1')]:
-                        _fp = _os.path.join(_csv_dir, f"{_base}-latdiff-{suffix}.csv")
+                # ── latdiff: write 3 CSVs ──────────────────────────────────
+                if p == 'latdiff' and _cmp_datasets:
+                    _puid  = _plot_unis[0]
+                    _ea    = _all_uni_data[_puid]['elements']
+                    _la    = _uni_labels.get(_puid, 'primary')
+                    _cd    = _cmp_datasets[0]
+                    _eb    = _cd['all_uni'][_cd['plot_unis'][0]]['elements']
+                    _lb    = _cd['label']
+                    _PHY   = {'sbend','quadrupole','sextupole','rfcavity','lcavity'}
+                    _ma    = [e for e in _ea if e['key'].lower() in _PHY]
+                    _mb    = [e for e in _eb if e['key'].lower() in _PHY]
+                    if len(_ma) == len(_mb):
+                        # Strengths
+                        _fp = _os.path.join(_csv_dir, f"{_base}-latdiff-strengths.csv")
                         with open(_fp, 'w', newline='') as f:
                             w = _csv.writer(f)
                             w.writerow(['#','name','type',
-                                        f'X_{suffix}_{_la}',f'X_{suffix}_{_lb}',f'dX_{suffix}',
-                                        f'Y_{suffix}_{_la}',f'Y_{suffix}_{_lb}',f'dY_{suffix}',
-                                        f'Z_{suffix}_{_la}',f'Z_{suffix}_{_lb}',f'dZ_{suffix}'])
+                                        f'L_{_la}',f'L_{_lb}','dL',
+                                        f'k1_{_la}',f'k1_{_lb}','dk1',
+                                        f'k2_{_la}',f'k2_{_lb}','dk2'])
                             for i,(ea,eb) in enumerate(zip(_ma,_mb)):
-                                n = k1
-                                xa,xb = ea.get(f'flr_x{n}'), eb.get(f'flr_x{n}')
-                                ya,yb = ea.get(f'flr_y{n}'), eb.get(f'flr_y{n}')
-                                za,zb = ea.get(f'flr_z{n}'), eb.get(f'flr_z{n}')
-                                fmt = lambda v: f'{v:.6f}' if v is not None else ''
-                                dfmt = lambda a,b: f'{b-a:.6f}' if a is not None and b is not None else ''
                                 w.writerow([i+1, ea['name'], ea['key'],
-                                            fmt(xa),fmt(xb),dfmt(xa,xb),
-                                            fmt(ya),fmt(yb),dfmt(ya,yb),
-                                            fmt(za),fmt(zb),dfmt(za,zb)])
+                                            f"{ea['length']:.6f}", f"{eb['length']:.6f}",
+                                            f"{eb['length']-ea['length']:.6f}",
+                                            f"{ea.get('k1',0):.6f}", f"{eb.get('k1',0):.6f}",
+                                            f"{eb.get('k1',0)-ea.get('k1',0):.6f}",
+                                            f"{ea.get('k2',0):.6f}", f"{eb.get('k2',0):.6f}",
+                                            f"{eb.get('k2',0)-ea.get('k2',0):.6f}"])
                         _log(f"✓ CSV → {_fp}")
-                continue
+                        # Entry/Exit positions
+                        for suffix, k0, k1 in [('entry','flr_','0'), ('exit','flr_','1')]:
+                            _fp = _os.path.join(_csv_dir, f"{_base}-latdiff-{suffix}.csv")
+                            with open(_fp, 'w', newline='') as f:
+                                w = _csv.writer(f)
+                                w.writerow(['#','name','type',
+                                            f'X_{suffix}_{_la}',f'X_{suffix}_{_lb}',f'dX_{suffix}',
+                                            f'Y_{suffix}_{_la}',f'Y_{suffix}_{_lb}',f'dY_{suffix}',
+                                            f'Z_{suffix}_{_la}',f'Z_{suffix}_{_lb}',f'dZ_{suffix}'])
+                                for i,(ea,eb) in enumerate(zip(_ma,_mb)):
+                                    n = k1
+                                    xa,xb = ea.get(f'flr_x{n}'), eb.get(f'flr_x{n}')
+                                    ya,yb = ea.get(f'flr_y{n}'), eb.get(f'flr_y{n}')
+                                    za,zb = ea.get(f'flr_z{n}'), eb.get(f'flr_z{n}')
+                                    fmt = lambda v: f'{v:.6f}' if v is not None else ''
+                                    dfmt = lambda a,b: f'{b-a:.6f}' if a is not None and b is not None else ''
+                                    w.writerow([i+1, ea['name'], ea['key'],
+                                                fmt(xa),fmt(xb),dfmt(xa,xb),
+                                                fmt(ya),fmt(yb),dfmt(ya,yb),
+                                                fmt(za),fmt(zb),dfmt(za,zb)])
+                            _log(f"✓ CSV → {_fp}")
+                    continue
 
-            # ── summary: write one CSV per universe ───────────────────
-            if p == 'summary':
+                # ── summary: write one CSV per universe ───────────────────
+                if p == 'summary':
+                    for _uid in _plot_unis:
+                        _ulbl = _uni_labels.get(_uid, f'u{_uid}')
+                        _ud   = _all_uni_data[_uid]
+                        _bp   = _ud.get('beam_params', {})
+                        _fp   = _os.path.join(_csv_dir, f"{_base}-summary-{_ulbl}.csv")
+                        with open(_fp, 'w', newline='') as f:
+                            w = _csv.writer(f)
+                            w.writerow(['quantity','value'])
+                            for k,v in _bp.items():
+                                if v is not None: w.writerow([k, f'{v:.6f}' if isinstance(v,float) else v])
+                        _log(f"✓ CSV → {_fp}")
+                    continue
+
+                # ── data panels: twiss, orbit, dispersion etc ─────────────
+                slug = _slug(p)
+                cols = _PANEL_COLS.get(slug, None)
+                if cols is None: continue
+
                 for _uid in _plot_unis:
                     _ulbl = _uni_labels.get(_uid, f'u{_uid}')
                     _ud   = _all_uni_data[_uid]
-                    _bp   = _ud.get('beam_params', {})
-                    _fp   = _os.path.join(_csv_dir, f"{_base}-summary-{_ulbl}.csv")
+                    suffix = f'-{_ulbl}' if _multi else ''
+                    _fp = _os.path.join(_csv_dir, f"{_base}-{slug}{suffix}.csv")
                     with open(_fp, 'w', newline='') as f:
                         w = _csv.writer(f)
-                        w.writerow(['quantity','value'])
-                        for k,v in _bp.items():
-                            if v is not None: w.writerow([k, f'{v:.6f}' if isinstance(v,float) else v])
+                        w.writerow([_COL_LABELS.get(c, c) for c in cols])
+                        _arr = lambda k: _ud.get(k, np.array([]))
+                        n_pts = len(_arr('s'))
+                        for i in range(n_pts):
+                            w.writerow([f"{_arr(c)[i]:.6e}" if i < len(_arr(c)) else '' for c in cols])
                     _log(f"✓ CSV → {_fp}")
-                continue
+        if show: fig.show()
+        return fig
 
-            # ── data panels: twiss, orbit, dispersion etc ─────────────
-            slug = _slug(p)
-            cols = _PANEL_COLS.get(slug, None)
-            if cols is None: continue
-
-            for _uid in _plot_unis:
-                _ulbl = _uni_labels.get(_uid, f'u{_uid}')
-                _ud   = _all_uni_data[_uid]
-                suffix = f'-{_ulbl}' if _multi else ''
-                _fp = _os.path.join(_csv_dir, f"{_base}-{slug}{suffix}.csv")
-                with open(_fp, 'w', newline='') as f:
-                    w = _csv.writer(f)
-                    w.writerow([_COL_LABELS.get(c, c) for c in cols])
-                    _arr = lambda k: _ud.get(k, np.array([]))
-                    n_pts = len(_arr('s'))
-                    for i in range(n_pts):
-                        w.writerow([f"{_arr(c)[i]:.6e}" if i < len(_arr(c)) else '' for c in cols])
-                _log(f"✓ CSV → {_fp}")
-    if show: fig.show()
-    return fig
+    return _finalize(fig)
 
 # ════════════════════════════════════════════════════════════════════════════

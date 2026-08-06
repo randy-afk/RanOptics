@@ -4,10 +4,27 @@
 # =============================================================================
 
 from __future__ import annotations
-import math, re as _re_expr
+import ast, math, re as _re_expr
 import numpy as np
 
 from core.loaders import _query_tao_attrs, _query_elegant_attrs, _query_xsuite_attrs
+
+def _validate_expr_ast(expr_str):
+    """Reject expression syntax that could escape the eval sandbox.
+
+    Blocking `__builtins__` stops calling dangerous names directly, but does
+    nothing against attribute-chain escapes like
+    `().__class__.__bases__[0].__subclasses__()`, which reach arbitrary
+    classes (e.g. subprocess) without needing any builtin at all. No
+    legitimate optics expression needs dunder attribute access or a lambda,
+    so both are rejected outright.
+    """
+    tree = ast.parse(expr_str, mode='eval')
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr.startswith('_'):
+            raise ValueError(f"disallowed attribute access: '{node.attr}'")
+        if isinstance(node, ast.Lambda):
+            raise ValueError("lambda expressions are not allowed")
 def _parse_tao_dotnames(expr):
     """Find all Tao-style dot-names in an expression.
     Matches word.word patterns NOT followed by '(' (excludes np.sqrt etc.)
@@ -82,9 +99,12 @@ def _eval_expression_tao(expr_str, namespace, data, s_len, log_fn=None):
     for _k in namespace:
         if '/' in _k:
             _safe = _re_ev2.sub(r'[^a-zA-Z0-9_]', '_', _k)
-            safe_expr = safe_expr.replace(_k, _safe)
+            safe_expr = _re_ev2.sub(r'\b' + _re_ev2.escape(_k) + r'\b', _safe, safe_expr)
     try:
-        result = eval(safe_expr, {"__builtins__": {}}, namespace)
+        _validate_expr_ast(safe_expr)
+        ns_globals = dict(namespace)
+        ns_globals['__builtins__'] = {}
+        result = eval(safe_expr, ns_globals)
         return np.asarray(result, dtype=float)
     except Exception as e:
         L(f"[expr] Error evaluating \'{expr_str}\': {e}")
@@ -273,9 +293,12 @@ def _eval_expression(expr_str, namespace, log_fn=None):
     for _k in namespace:
         if '/' in _k:
             _safe = _re_ev.sub(r'[^a-zA-Z0-9_]', '_', _k)
-            safe_expr = safe_expr.replace(_k, _safe)
+            safe_expr = _re_ev.sub(r'\b' + _re_ev.escape(_k) + r'\b', _safe, safe_expr)
     try:
-        result = eval(safe_expr, {"__builtins__": {}}, namespace)
+        _validate_expr_ast(safe_expr)
+        ns_globals = dict(namespace)
+        ns_globals['__builtins__'] = {}
+        result = eval(safe_expr, ns_globals)
         return np.asarray(result, dtype=float)
     except Exception as e:
         L(f"[expr] Error evaluating '{expr_str}': {e}")

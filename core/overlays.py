@@ -16,8 +16,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.themes import (
-    ACCENT, ACCENT2, BG, BORDER, CRUST, ERROR, FG, FG_DIM, FG_LBL,
-    MANTLE, PANEL, SUCCESS, SURFACE2, HIGHLIGHT, WARN,
+    ACCENT, ACCENT2, ACCENTH, AINK, BG, BORDER, CRUST, ERROR, FG, FG_DIM, FG_LBL,
+    MANTLE, PANEL, PANEL2, SUCCESS, SURFACE2, HIGHLIGHT, WARN,
     FONT_BOLD, FONT_MAIN, FONT_MONO, FONT_SEC, FONT_SMALL,
     _BTN_SS, _CHK_SS, _COMBO_SS, _ENTRY_SS, _RB_SS, _SCROLL_SS,
 )
@@ -172,7 +172,7 @@ class CustomPanelOverlay:
         lbl.setStyleSheet(f"color: {ACCENT2}; background: transparent;")
         title_h.addWidget(lbl); title_h.addStretch()
         add_b = QPushButton("Add"); add_b.setFont(FONT_BOLD); add_b.setFixedSize(80, 28)
-        add_b.setStyleSheet(f"QPushButton {{ background: {ACCENT}; border-radius: 6px; color: white; }} QPushButton:hover {{ background: #3a9fff; }}")
+        add_b.setStyleSheet(f"QPushButton {{ background: {ACCENT}; border-radius: 6px; color: {AINK}; }} QPushButton:hover {{ background: {ACCENTH}; }}")
         add_b.clicked.connect(self._ok)
         can_b = QPushButton("Cancel"); can_b.setFont(FONT_MAIN); can_b.setFixedSize(90, 28)
         can_b.setStyleSheet(f"QPushButton {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 6px; color: {FG_DIM}; }} QPushButton:hover {{ background: {BORDER}; }}")
@@ -182,7 +182,7 @@ class CustomPanelOverlay:
 
         # Scroll area
         sa, inner_w, inner_v = _make_scroll_widget()
-        inner_w.setStyleSheet(f"background: #28282a;")
+        inner_w.setStyleSheet(f"background: {PANEL2};")
         layout.addWidget(sa)
         self._inner_v = inner_v
         self._inner_w = inner_w
@@ -204,7 +204,7 @@ class CustomPanelOverlay:
         inner_v.addWidget(self._y1_box_w)
         self._add_y1_row()
         add_y1 = QPushButton("+ add dataset to Y1"); add_y1.setFont(FONT_MAIN)
-        add_y1.setStyleSheet(f"QPushButton {{ background: transparent; color: {ACCENT2}; border: none; text-align: left; padding: 2px 4px; }} QPushButton:hover {{ color: white; }}")
+        add_y1.setStyleSheet(f"QPushButton {{ background: transparent; color: {ACCENT2}; border: none; text-align: left; padding: 2px 4px; }} QPushButton:hover {{ color: {AINK}; }}")
         add_y1.clicked.connect(lambda: self._add_y1_row())
         inner_v.addWidget(add_y1)
 
@@ -301,16 +301,16 @@ class ExprPanelOverlay:
         lbl.setStyleSheet(f"color: {ACCENT2}; background: transparent;")
         title_h.addWidget(lbl); title_h.addStretch()
         add_b = QPushButton("Add"); add_b.setFont(FONT_BOLD); add_b.setFixedSize(80, 28)
-        add_b.setStyleSheet(f"QPushButton {{ background: {ACCENT}; border-radius: 6px; color: white; }} QPushButton:hover {{ background: #3a9fff; }}")
+        add_b.setStyleSheet(f"QPushButton {{ background: {ACCENT}; border-radius: 6px; color: {AINK}; }} QPushButton:hover {{ background: {ACCENTH}; }}")
         add_b.clicked.connect(self._ok)
         can_b = QPushButton("Cancel"); can_b.setFont(FONT_MAIN); can_b.setFixedSize(90, 28)
         can_b.setStyleSheet(f"QPushButton {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 6px; color: {FG_DIM}; }} QPushButton:hover {{ background: {BORDER}; }}")
-        can_b.clicked.connect(lambda: on_done(None))
+        can_b.clicked.connect(self._cancel)
         title_h.addWidget(add_b); title_h.addWidget(can_b)
         layout.addWidget(title_w)
 
         sa, inner_w, inner_v = _make_scroll_widget()
-        inner_w.setStyleSheet(f"background: #28282a;")
+        inner_w.setStyleSheet(f"background: {PANEL2};")
         layout.addWidget(sa)
         self._inner_v = inner_v
         self._inner_w = inner_w
@@ -338,7 +338,7 @@ class ExprPanelOverlay:
         btn_row_h = QHBoxLayout(btn_row_w); btn_row_h.setContentsMargins(4, 0, 4, 8); btn_row_h.setSpacing(6)
         _b = lambda text, cmd, color: (lambda b: (
             b.setFont(FONT_MAIN), b.setFixedSize(len(text)*8+20, 30),
-            b.setStyleSheet(f"QPushButton {{ background: {BG}; border: 1px solid {color}; border-radius: 6px; color: {color}; }} QPushButton:hover {{ background: {color}; color: white; }}"),
+            b.setStyleSheet(f"QPushButton {{ background: {BG}; border: 1px solid {color}; border-radius: 6px; color: {color}; }} QPushButton:hover {{ background: {color}; color: {AINK}; }}"),
             b.clicked.connect(cmd),
             btn_row_h.addWidget(b)
         ))(QPushButton(text))
@@ -364,7 +364,7 @@ class ExprPanelOverlay:
         self.e_extra.setVisible(False)
         ex_btn = QPushButton("+ Extra attributes to fetch"); ex_btn.setFont(FONT_MAIN)
         ex_btn.setCheckable(True); ex_btn.setChecked(False)
-        ex_btn.setStyleSheet(f"QPushButton {{ background: transparent; color: {ACCENT2}; border: none; text-align: left; padding: 2px 4px; }} QPushButton:checked {{ color: white; }} QPushButton:hover {{ color: white; }}")
+        ex_btn.setStyleSheet(f"QPushButton {{ background: transparent; color: {ACCENT2}; border: none; text-align: left; padding: 2px 4px; }} QPushButton:checked {{ color: {AINK}; }} QPushButton:hover {{ color: {AINK}; }}")
         ex_btn.toggled.connect(lambda checked: self.e_extra.setVisible(checked))
         inner_v.addWidget(ex_btn)
         inner_v.addWidget(self.e_extra)
@@ -416,6 +416,22 @@ class ExprPanelOverlay:
         QApplication.instance().focusChanged.connect(_on_focus_changed)
         self._focus_conn = _on_focus_changed   # keep reference alive
         self._last_entry = self.e_y1
+
+    def _disconnect_focus(self):
+        """Undo the focusChanged connection from __init__ — must run before
+        this composer's widgets are torn down, otherwise the connection
+        outlives them and fires against deleted QLineEdits on every future
+        focus change in the app."""
+        if self._focus_conn is not None:
+            try:
+                QApplication.instance().focusChanged.disconnect(self._focus_conn)
+            except (RuntimeError, TypeError):
+                pass
+            self._focus_conn = None
+
+    def _cancel(self):
+        self._disconnect_focus()
+        self._on_done(None)
 
     def _on_entry_focus(self, entry):
         self._last_entry = entry
@@ -531,7 +547,7 @@ class ExprPanelOverlay:
             rw = QWidget(); rw.setStyleSheet("background: transparent;")
             rh = QHBoxLayout(rw); rh.setContentsMargins(8, 1, 8, 1); rh.setSpacing(8)
             nb = QPushButton(name); nb.setFont(FONT_MONO); nb.setFixedHeight(24)
-            nb.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: white; }}")
+            nb.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: {AINK}; }}")
             nb.clicked.connect(lambda _=False, n=name: _insert(n))
             rh.addWidget(nb)
             if val is not None:
@@ -572,6 +588,7 @@ class ExprPanelOverlay:
         y1_label = self.e_y1_label.text().strip() or None
         y2_label = self.e_y2_label.text().strip() or None
         name     = self.e_name.text().strip() or "Expression Panel"
+        self._disconnect_focus()
         self._on_done({
             'name': name, 'type': 'expr',
             'extra_attrs': extra,
@@ -680,7 +697,7 @@ class TaoDataBrowser:
         rw = QWidget(); rw.setStyleSheet("background: transparent;")
         rh = QHBoxLayout(rw); rh.setContentsMargins(8, 1, 8, 1); rh.setSpacing(6)
         b = QPushButton(name); b.setFont(FONT_MONO); b.setFixedHeight(24)
-        b.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: white; }}")
+        b.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: {AINK}; }}")
         b.clicked.connect(lambda _=False, n=name: self._insert(n))
         dl = QLabel(desc); dl.setFont(FONT_SMALL); dl.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
         rh.addWidget(b); rh.addWidget(dl); rh.addStretch()
@@ -894,7 +911,7 @@ class ElegantDataBrowser:
             rw = QWidget(); rw.setStyleSheet("background: transparent;")
             rh = QHBoxLayout(rw); rh.setContentsMargins(8, 1, 8, 1); rh.setSpacing(6)
             b = QPushButton(name); b.setFont(FONT_MONO); b.setFixedHeight(24)
-            b.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: white; }}")
+            b.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: {AINK}; }}")
             b.clicked.connect(lambda _=False, n=name: self._insert(n))
             dl = QLabel(desc); dl.setFont(FONT_SMALL); dl.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
             rh.addWidget(b); rh.addWidget(dl); rh.addStretch()
@@ -1019,7 +1036,7 @@ class MadxDataBrowser:
             rw = QWidget(); rw.setStyleSheet("background: transparent;")
             rh = QHBoxLayout(rw); rh.setContentsMargins(8, 1, 8, 1); rh.setSpacing(6)
             b = QPushButton(name); b.setFont(FONT_MONO); b.setFixedHeight(24)
-            b.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: white; }}")
+            b.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: {AINK}; }}")
             b.clicked.connect(lambda _=False, n=name: self._insert(n))
             dl = QLabel(desc); dl.setFont(FONT_SMALL)
             dl.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
@@ -1172,7 +1189,7 @@ class XsuiteDataBrowser:
             rw = QWidget(); rw.setStyleSheet("background: transparent;")
             rh = QHBoxLayout(rw); rh.setContentsMargins(8, 1, 8, 1); rh.setSpacing(6)
             b = QPushButton(col); b.setFont(FONT_MONO); b.setFixedHeight(24)
-            b.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: white; }}")
+            b.setStyleSheet(f"QPushButton {{ background: {PANEL}; color: {ACCENT}; border: none; border-radius: 3px; padding: 1px 6px; }} QPushButton:hover {{ background: {ACCENT}; color: {AINK}; }}")
             b.clicked.connect(lambda _=False, n=col: self._insert(n))
             rh.addWidget(b); rh.addStretch()
             self._inner_v.insertWidget(i + 1, rw)
@@ -1198,6 +1215,7 @@ class XsuiteDataBrowser:
 # ─── Entry point ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
+    from core.gui import RanOpticsGUI
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
@@ -1215,6 +1233,6 @@ if __name__ == "__main__":
     palette.setColor(QPalette.PlaceholderText, QColor(FG_DIM))
     app.setPalette(palette)
 
-    win = LuxV4GUI()
+    win = RanOpticsGUI()
     win.show()
     sys.exit(app.exec())

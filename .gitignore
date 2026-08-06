@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+.pytest_cache/
+optics.html
+site/
+.claude/worktrees/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

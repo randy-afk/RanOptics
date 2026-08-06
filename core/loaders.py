@@ -296,10 +296,10 @@ def _query_tao_attrs(tao, attrs, uni_idx=1, log_fn=None):
 
 def _query_elegant_attrs(data, attrs, log_fn=None):
     """Extract per-element column arrays from already-loaded ELEGANT data dict.
-    Handles both lux internal names (beta_a) and ELEGANT names (betax).
+    Handles both RanOptics internal names (beta_a) and ELEGANT names (betax).
     Returns dict of attr_name -> np.ndarray.
     """
-    # Map ELEGANT column names and lux internal names to data dict keys
+    # Map ELEGANT column names and RanOptics internal names to data dict keys
     _KEY_MAP = {
         'beta_a':'beta_a',  'beta_b':'beta_b',
         'betax': 'beta_a',  'betay': 'beta_b',
@@ -726,7 +726,7 @@ def load_elegant(ele_file, log_fn=None, progress_fn=None):
 
 # ─── MAD-X backend ───────────────────────────────────────────────────────────
 # load_madx(): reads twiss.tfs and optionally survey.tfs output files from MAD-X
-# No cpymad required — user runs MAD-X, lux reads the output files.
+# No cpymad required — user runs MAD-X, RanOptics reads the output files.
 
 def _read_tfs(filepath):
     """Parse a MAD-X TFS file.
@@ -857,7 +857,7 @@ def load_madx(twiss_file, survey_file=None, log_fn=None, progress_fn=None):
     n    = len(s)
     L(f"[madx] Twiss table: {n} elements, s_max={float(s[-1]):.3f} m")
 
-    # Phase advance: MAD-X MUX/MUY are in tune units (cycles), consistent with lux convention
+    # Phase advance: MAD-X MUX/MUY are in tune units (cycles), consistent with RanOptics convention
     pa = mux; pb = muy
 
     P(30, 'Building element list...')
@@ -889,7 +889,8 @@ def load_madx(twiss_file, survey_file=None, log_fn=None, progress_fn=None):
         tilt   = float(tilt_arr[i])
         hkick  = float(hkick_arr[i])
         vkick  = float(vkick_arr[i])
-        kick   = hkick if key == 'kicker' else 0.0
+        kw_l   = keyword.lower()
+        kick   = hkick if kw_l == 'hkicker' else (vkick if kw_l == 'vkicker' else 0.0)
 
         elements.append({
             'name':      name,
@@ -1245,10 +1246,11 @@ def load_xsuite(json_file, log_fn=None, twiss_method='6d', line_name=None, progr
                 if hasattr(el, 'h'):
                     v = _scalar(el.h)
                     if v: angle = v * length
-                # Prefer el.angle directly if available (Bend elements)
+                # Prefer el.angle directly if available (Bend elements) — same
+                # sign convention as h*length (angle == h*length in xtrack), no negation
                 if hasattr(el, 'angle'):
                     v = _scalar(el.angle)
-                    if v: angle = -v
+                    if v: angle = v
             except Exception:
                 pass
 

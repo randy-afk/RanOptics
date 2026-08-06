@@ -11,12 +11,10 @@ from PySide6.QtWidgets import (
     QPushButton, QRadioButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from core.themes import (
-    ACCENT, ACCENT2, BG, BORDER, CRUST, FG, FG_DIM, FG_LBL,
-    MANTLE, PANEL, SURFACE2,
-    FONT_MAIN, FONT_MONO, FONT_SEC, FONT_SMALL,
-    _CHK_SS, _COMBO_SS, _ENTRY_SS, _RB_SS, _SCROLL_SS,
-)
+import core.themes as _th
+
+# Live accessors — always reads current theme values after apply_theme()
+def _t(): return _th
 
 # ── Element visual helpers ────────────────────────────────────────────────────
 
@@ -31,6 +29,8 @@ _ELEM_COLOR_DEFAULTS = {
     'rfcavity':   'cyan',
     'lcavity':    'cyan',
 }
+# Fallback swatch color for element type keys with no entry above (e.g. 'other', 'drift')
+_ELEM_COLOR_FALLBACK = '#888888'
 
 def element_color(key, elem_colors=None):
     """Return the plot color for an element type.
@@ -163,7 +163,7 @@ def _make_scroll_widget(parent=None):
     """Returns (scroll_area, inner_widget, vbox_layout)."""
     sa = QScrollArea(parent)
     sa.setWidgetResizable(True)
-    sa.setStyleSheet(_SCROLL_SS)
+    sa.setStyleSheet(_th._SCROLL_SS)
     inner = QWidget()
     inner.setStyleSheet("background: transparent;")
     vbox = QVBoxLayout(inner)
@@ -173,12 +173,13 @@ def _make_scroll_widget(parent=None):
     return sa, inner, vbox
 
 def _sec(layout, title):
-    """Section header: pill label + horizontal rule."""
-    w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(8, 8, 8, 2); h.setSpacing(8)
-    lbl = QLabel(f"  {title.upper()}  "); lbl.setFont(FONT_SEC)
-    lbl.setStyleSheet(f"color: {CRUST}; background: {ACCENT2}; border-radius: 4px; padding: 1px 4px;")
+    """Section header: uppercase faint label + horizontal rule."""
+    w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(8, 12, 8, 4); h.setSpacing(8)
+    lbl = QLabel(title.upper()); lbl.setFont(_th.FONT_SMALL)
+    lbl.setStyleSheet(f"color: {_th.FG_LBL}; background: transparent; font-weight: 600; letter-spacing: 1.6px;")
     line = QFrame(); line.setFrameShape(QFrame.HLine)
-    line.setStyleSheet(f"color: {BORDER}; background: {BORDER};")
+    line.setStyleSheet(f"background: {_th.BORDER}; border: none;")
+    line.setFixedHeight(1)
     h.addWidget(lbl); h.addWidget(line, 1)
     layout.addWidget(w)
 
@@ -186,8 +187,7 @@ def _card(layout):
     """Transparent container widget. Returns (widget, vbox)."""
     w = QWidget(); w.setStyleSheet("background: transparent;")
     v = QVBoxLayout(w); v.setContentsMargins(0, 2, 0, 2); v.setSpacing(0)
-    layout.addWidget(w)
-    return w, v
+    layout.addWidget(w); return w, v
 
 def _row(layout):
     """Horizontal row. Returns QHBoxLayout added to layout."""
@@ -198,53 +198,54 @@ def _row(layout):
     return h
 
 def _lbl(layout, text, width=160):
-    lbl = QLabel(text); lbl.setFont(FONT_MAIN)
-    lbl.setStyleSheet(f"color: {FG_LBL}; background: transparent;")
+    lbl = QLabel(text); lbl.setFont(_th.FONT_MAIN)
+    lbl.setStyleSheet(f"color: {_th.FG_LBL}; background: transparent;")
     lbl.setFixedWidth(width); lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     layout.addWidget(lbl)
 
 def _ent(layout, width=200, placeholder=""):
-    e = QLineEdit(); e.setFont(FONT_MONO)
+    e = QLineEdit(); e.setFont(_th.FONT_MONO)
     e.setPlaceholderText(placeholder); e.setFixedWidth(width)
-    e.setStyleSheet(_ENTRY_SS)
+    e.setStyleSheet(_th._ENTRY_SS)
     layout.addWidget(e); return e
 
-def _btn(layout, text, cmd, width=80, color=ACCENT):
-    b = QPushButton(text); b.setFont(FONT_MAIN); b.setFixedWidth(width)
+def _btn(layout, text, cmd, width=80, color=None):
+    if color is None: color = _th.ACCENT
+    b = QPushButton(text); b.setFont(_th.FONT_MAIN); b.setFixedWidth(width)
     b.clicked.connect(cmd)
     b.setStyleSheet(f"""
         QPushButton {{
-            background: {PANEL}; border: 1px solid {BORDER};
+            background: {_th.PANEL}; border: 1px solid {_th.BORDER};
             border-radius: 8px; color: {color}; padding: 4px 8px;
         }}
-        QPushButton:hover {{ background: {SURFACE2}; border-color: {color}; }}
-        QPushButton:pressed {{ background: {BORDER}; }}
-        QPushButton:disabled {{ color: {FG_DIM}; border-color: {BORDER}; background: {PANEL}; }}
+        QPushButton:hover {{ background: {_th.SURFACE2}; border-color: {color}; }}
+        QPushButton:pressed {{ background: {_th.BORDER}; }}
+        QPushButton:disabled {{ color: {_th.FG_DIM}; border-color: {_th.BORDER}; background: {_th.PANEL}; }}
     """)
     layout.addWidget(b); return b
 
 def _chk(layout, text):
-    c = QCheckBox(text); c.setFont(FONT_MAIN); c.setStyleSheet(_CHK_SS)
+    c = QCheckBox(text); c.setFont(_th.FONT_MAIN); c.setStyleSheet(_th._CHK_SS)
     layout.addWidget(c); return c
 
 def _dd(layout, items, width=120):
-    cb = QComboBox(); cb.setFont(FONT_MAIN); cb.addItems(items)
-    cb.setFixedWidth(width); cb.setStyleSheet(_COMBO_SS)
+    cb = QComboBox(); cb.setFont(_th.FONT_MAIN); cb.addItems(items)
+    cb.setFixedWidth(width); cb.setStyleSheet(_th._COMBO_SS)
     layout.addWidget(cb); return cb
 
 def _hint(layout, text):
-    lbl = QLabel(text); lbl.setFont(FONT_SMALL)
-    lbl.setStyleSheet(f"color: {FG_DIM}; background: transparent;")
+    lbl = QLabel(text); lbl.setFont(_th.FONT_SMALL)
+    lbl.setStyleSheet(f"color: {_th.FG_DIM}; background: transparent;")
     layout.addWidget(lbl)
 
 def _help(layout, text):
     """Dimmed description line."""
-    lbl = QLabel(text); lbl.setFont(FONT_SMALL); lbl.setWordWrap(True)
-    lbl.setStyleSheet(f"color: {FG_DIM}; background: transparent; padding: 0 12px 4px 12px;")
+    lbl = QLabel(text); lbl.setFont(_th.FONT_SMALL); lbl.setWordWrap(True)
+    lbl.setStyleSheet(f"color: {_th.FG_DIM}; background: transparent; padding: 0 12px 4px 12px;")
     layout.addWidget(lbl)
 
 def _rb(layout, text, group, val, cmd=None):
-    r = QRadioButton(text); r.setFont(FONT_MAIN); r.setStyleSheet(_RB_SS)
+    r = QRadioButton(text); r.setFont(_th.FONT_MAIN); r.setStyleSheet(_th._RB_SS)
     r.setProperty("value", val)
     if cmd: r.clicked.connect(cmd)
     group.addButton(r); layout.addWidget(r); return r

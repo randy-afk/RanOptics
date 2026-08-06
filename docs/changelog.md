@@ -1,6 +1,35 @@
 # Changelog
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
+
+## [2.0.0] - 2026-08
+### Fixed
+- Expression evaluator (`expr.py`) sandbox escape — dunder attribute access (e.g. `().__class__.__bases__`) could reach arbitrary Python classes from a preset file. Eval namespace is now AST-validated before evaluation.
+- Expression evaluator: list/dict comprehensions raised `NameError` due to a split globals/locals eval scope; also fixed a `/`-containing namespace key substitution that used blind substring replace instead of word-boundary matching.
+- Floor plan builder (`panels.py`): `KeyError` when floor coordinates exist for some but not all elements (e.g. MAD-X survey file shorter than the twiss table, or Tao universe/patch gaps).
+- Floor plan builder: `flip_bend` did not negate `flr_theta1`, producing incorrect dipole curvature when survey/`.flr` data included a per-element exit angle.
+- Floor plan builder: YZ dead-reckoning legend ignored `show_fp_legend` and could duplicate the "Dipole" legend entry.
+- Twiss panel auto-tick logic (`engine.py`) crashed with `NaN → int` when all plotted beta values were zero.
+- Grid layout (`engine.py`): multi-universe floor-plan cells dropped universe 0's legend keys, leaving its legend unpositioned/unhideable.
+- Grid layout: `latdiff` panel rows all showed a duplicate title instead of only the first of each 3-row block.
+- xsuite loader: bend-angle sign was inverted when reading `.angle` after `.h`, mirroring every dipole's curvature in xsuite lattices.
+- MAD-X loader: `VKICKER` elements displayed `hkick` instead of `vkick` in hover text (all kicker subtypes collapsed to one internal key).
+- GUI: CSV export left the status bar stuck on "Exporting CSV…" on failure and had no re-entrancy guard against overlapping exports.
+- GUI: loading a preset only overlaid keys present in the file, so fields missing from an older/partial preset silently kept whatever was on screen. Preset load now resets to app defaults first.
+- GUI: expression panel composer connected a closure to the global `QApplication.focusChanged` signal on every open and never disconnected it, leaking references to destroyed widgets on repeated open/cancel.
+### Changed
+- Hardcoded colors in `overlays.py` and `gui.py` replaced with `themes.py` tokens throughout, per project convention.
+- Removed dead code: unused `_WorkerThread`/`_FodoLogo` classes and the unreferenced `_RanOpticsLogo` import in `gui.py`.
+### Added
+- MkDocs Material documentation site (`docs/`, `mkdocs.yml`) with GitHub Pages deploy workflow.
+- `LICENSE` (MIT), `requirements.txt`, `environment.yml`.
+
+## [1.3.0] - 2026-05
+### Added
+- Colors tab in right panel — per-element-type color customization
+- Color picker with swatch buttons and reset-to-default for each element type
+- Element colors persisted in presets (saved to JSON)
+- elem_colors parameter added to plot_optics() and threaded through all panel builders
 ---
 ## [1.2.2] - 2026-05
 ### Fixed
