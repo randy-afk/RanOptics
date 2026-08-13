@@ -3,6 +3,7 @@
 # =============================================================================
 
 from __future__ import annotations
+import importlib.util, shutil
 import numpy as np
 
 from PySide6.QtCore    import Qt
@@ -15,6 +16,35 @@ import core.themes as _th
 
 # Live accessors — always reads current theme values after apply_theme()
 def _t(): return _th
+
+# ── Backend availability ─────────────────────────────────────────────────────
+
+def check_backend_ready(code):
+    """Check whether the backend for `code` is actually usable before
+    attempting to load a file with it.
+
+    Returns None if ready, or a user-facing message describing what's
+    missing. MAD-X needs no check — RanOptics only parses its output files
+    and never invokes madx itself.
+    """
+    if code == 'tao':
+        if importlib.util.find_spec('pytao') is None:
+            return ("Tao/Bmad backend not found.\n\n"
+                     "pytao is not installed (or its Bmad shared libraries "
+                     "aren't on the library path). Install pytao and Bmad, "
+                     "then restart RanOptics. See docs/installation.md.")
+    elif code == 'elegant':
+        missing = [exe for exe in ('elegant', 'sddsconvert') if shutil.which(exe) is None]
+        if missing:
+            return (f"ELEGANT backend not found: {', '.join(missing)} not on PATH.\n\n"
+                     "Install elegant/sddsconvert and make sure they're on your "
+                     "system PATH, then restart RanOptics. See docs/installation.md.")
+    elif code == 'xsuite':
+        if importlib.util.find_spec('xtrack') is None:
+            return ("xsuite backend not found.\n\n"
+                     "Install it with: pip install xsuite\n"
+                     "See docs/installation.md.")
+    return None
 
 # ── Element visual helpers ────────────────────────────────────────────────────
 

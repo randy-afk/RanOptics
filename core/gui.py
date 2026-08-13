@@ -23,12 +23,12 @@ from core.themes import (
     FONT_BOLD, FONT_HDR, FONT_MAIN, FONT_MONO, FONT_SEC, FONT_SMALL,
 )
 from core.utils import (
-    _clf, _make_scroll_widget,
+    _clf, _make_scroll_widget, check_backend_ready,
     _sec, _card, _row, _lbl, _ent, _btn, _chk, _dd, _hint, _help, _rb,
     _parse_yrange, _parse_fp_range,
 )
 from core.engine import plot_optics
-from core.loaders import load_tao, load_elegant, load_xsuite, _parse_tao_init
+from core.loaders import load_tao, load_elegant, load_xsuite, load_madx, _parse_tao_init
 from core.overlays import (
     CustomPanelOverlay, ExprPanelOverlay,
     _TAO_DATA_CATEGORIES, _ELEGANT_TWI_COLUMNS, _ELEGANT_CEN_COLUMNS,
@@ -2144,6 +2144,9 @@ class RanOpticsGUI(QMainWindow):
         try: kwargs = self._collect_kwargs()
         except (ValueError, TypeError) as e:
             QMessageBox.critical(self, "Configuration Error", str(e)); return
+        _missing = check_backend_ready(kwargs['code'])
+        if _missing:
+            QMessageBox.critical(self, "Backend Not Found", _missing); return
 
         self.run_btn.setEnabled(False); self.stop_btn.setEnabled(True)
         self.open_btn.setEnabled(False); self.dryrun_btn.setEnabled(False)
@@ -2222,6 +2225,9 @@ class RanOpticsGUI(QMainWindow):
         try: kwargs = self._collect_kwargs()
         except (ValueError, TypeError) as e:
             QMessageBox.critical(self, "Configuration Error", str(e)); return
+        _missing = check_backend_ready(kwargs['code'])
+        if _missing:
+            QMessageBox.critical(self, "Backend Not Found", _missing); return
 
         self.run_btn.setEnabled(False); self.dryrun_btn.setEnabled(False)
         self._set_status("Inspecting…")
@@ -2231,8 +2237,9 @@ class RanOpticsGUI(QMainWindow):
             try:
                 code = kwargs['code']; inp = kwargs['input_file']
                 log = lambda m: self._sig_log.emit(m, "info")
-                if code == 'tao':     data = load_tao(inp, log_fn=log)
+                if code == 'tao':      data = load_tao(inp, log_fn=log)
                 elif code == 'xsuite': data = load_xsuite(inp, log_fn=log)
+                elif code == 'madx':   data = load_madx(inp, survey_file=kwargs.get('madx_survey'), log_fn=log)
                 else:                  data = load_elegant(inp, log_fn=log)
                 s = data['s']; elems = data['elements']
                 msg = f"\n✓ {len(elems)} elements, s = {float(s[0]):.3f} → {float(s[-1]):.3f} m\n"
@@ -2251,6 +2258,9 @@ class RanOpticsGUI(QMainWindow):
         try: kwargs = self._collect_kwargs()
         except (ValueError, TypeError) as e:
             QMessageBox.critical(self, "Configuration Error", str(e)); return
+        _missing = check_backend_ready(kwargs['code'])
+        if _missing:
+            QMessageBox.critical(self, "Backend Not Found", _missing); return
         # Use the base name from the field, trigger via save_csv flag
         kwargs['save_csv'] = True
         kwargs['csv_base'] = self.w_csv_base.text().strip() or 'lattice'

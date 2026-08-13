@@ -17,12 +17,15 @@ Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 - GUI: CSV export left the status bar stuck on "Exporting CSV…" on failure and had no re-entrancy guard against overlapping exports.
 - GUI: loading a preset only overlaid keys present in the file, so fields missing from an older/partial preset silently kept whatever was on screen. Preset load now resets to app defaults first.
 - GUI: expression panel composer connected a closure to the global `QApplication.focusChanged` signal on every open and never disconnected it, leaking references to destroyed widgets on repeated open/cancel.
+- GUI: Dry Run's lightweight loader dispatch had no MAD-X branch and fell through to `load_elegant()` on `.tfs` input; `load_madx` wasn't even imported in `gui.py`.
 ### Changed
 - Hardcoded colors in `overlays.py` and `gui.py` replaced with `themes.py` tokens throughout, per project convention.
 - Removed dead code: unused `_WorkerThread`/`_FodoLogo` classes and the unreferenced `_RanOpticsLogo` import in `gui.py`.
 ### Added
 - MkDocs Material documentation site (`docs/`, `mkdocs.yml`) with GitHub Pages deploy workflow.
 - `LICENSE` (MIT), `requirements.txt`, `environment.yml`.
+- Standalone executable builds via PyInstaller + GitHub Actions (`.github/workflows/build-ranoptics.yml`), triggered on GitHub Release creation. Bundles PySide6/plotly/numpy/kaleido; physics backends (Tao/Bmad, ELEGANT, MAD-X) remain external/user-installed, same as the source install.
+- Backend-availability check (`check_backend_ready()`) before Run/Dry Run/Export CSV — shows a clear popup instead of a raw traceback when the selected backend (Tao, ELEGANT, xsuite) isn't installed or on `PATH`.
 
 ## [1.3.0] - 2026-05
 ### Added
