@@ -2,9 +2,13 @@
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
+## [2.1.2] - 2026-08
+### Fixed
+- Tao/Bmad standalone build: the v2.1.1 preload fix didn't actually work — root-caused by directly inspecting a real failing process. Python's own `ssl`/`hashlib` modules load PyInstaller's bundled `libssl.so.3` (capped at symbol version `OPENSSL_3.0.x`, from the CI runner's system OpenSSL) automatically, before the app window even appears, which permanently claims that library's SONAME for the whole process. By the time Run is clicked, no amount of preloading a newer copy for Tao's benefit can dislodge it, since the dynamic linker already resolved that SONAME. Confirmed by direct reproduction (forcing the exact load order) and fixed at the source: the Linux build now bundles conda-forge's own OpenSSL (the same distribution Bmad itself is built against) in place of the runner's system copy, so whichever loads first is already new enough for both Python and Bmad. Verified end to end against a real Bmad lattice in an actual frozen build, including deliberately forcing `ssl` to load first to reproduce the exact failure ordering.
+
 ## [2.1.1] - 2026-08
 ### Fixed
-- Tao/Bmad standalone build: fixed a library version conflict where a staged dependency (e.g. `libcurl.so.4`) could resolve against PyInstaller's own bundled copy of a same-named library (e.g. an older `libssl.so.3`, bundled for Python's `ssl` module) instead of the correct staged one, causing a symbol-version error at load time. Every staged Bmad library is now explicitly preloaded before `libtao.so` itself, so the correct versions are already resident by the time anything looks for them.
+- Tao/Bmad standalone build: fixed a library version conflict where a staged dependency (e.g. `libcurl.so.4`) could resolve against PyInstaller's own bundled copy of a same-named library (e.g. an older `libssl.so.3`, bundled for Python's `ssl` module) instead of the correct staged one, causing a symbol-version error at load time. Every staged Bmad library is now explicitly preloaded before `libtao.so` itself, so the correct versions are already resident by the time anything looks for them. **Note: this fix did not actually resolve the issue on real-world installs — see 2.1.2.**
 
 ## [2.1.0] - 2026-08
 ### Added
