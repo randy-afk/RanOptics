@@ -340,25 +340,68 @@ def _query_xsuite_attrs(tw, attrs, log_fn=None):
 def _is_shared_lib_name(fname):
     return '.so' in fname or fname.endswith('.dylib') or fname.endswith('.dll')
 
+def _preload_staged_libs(staging_dir, skip_basename):
+    """Explicitly dlopen() every staged library except skip_basename,
+    before libtao.so itself gets loaded.
+
+    Why: directory-based staging (see _stage_bmad_lib) isn't reliable on
+    its own. If a frozen PyInstaller build happens to ALSO bundle a
+    library with the same name in its own _MEIPASS (e.g. libssl.so.3,
+    pulled in for Python's own ssl module or Qt's network stack), that
+    copy can win over our staged one when some OTHER staged library goes
+    looking for it by SONAME — even though the correct version is sitting
+    right next to it in the staging directory. Confirmed in practice: a
+    real user's build failed with "libssl.so.3: version OPENSSL_3.2.0
+    not found (required by .../libcurl.so.4)" — libcurl.so.4 needed a
+    newer OpenSSL than the one PyInstaller had bundled for its own
+    purposes, even though the correct one was staged alongside it.
+
+    Explicitly loading our correct copies first, with RTLD_GLOBAL, means
+    that by the time libtao.so (or any of its dependencies) looks for
+    something like libssl.so.3, the dynamic linker finds it ALREADY
+    resident in the process (matched by soname) and reuses it instead of
+    searching the filesystem and risking a different, wrong copy.
+
+    Order isn't known upfront, so this retries in passes: a library
+    whose own dependencies haven't loaded yet will fail and gets retried
+    once something else has succeeded. Stops once nothing more loads.
+    """
+    import ctypes
+    remaining = {f for f in os.listdir(staging_dir) if f != skip_basename}
+    for _ in range(len(remaining) + 1):
+        if not remaining:
+            break
+        progressed = False
+        for fname in list(remaining):
+            try:
+                ctypes.CDLL(os.path.join(staging_dir, fname), mode=ctypes.RTLD_GLOBAL)
+                remaining.discard(fname)
+                progressed = True
+            except OSError:
+                pass
+        if not progressed:
+            break
+
 def _stage_bmad_lib(bmad_lib, extra_paths):
     """Stage symlinks (falling back to copies) to bmad_lib and every shared
-    library in extra_paths into one fresh temp directory, and return the
-    path to the staged copy of bmad_lib.
+    library in extra_paths into one fresh temp directory, preload them
+    (see _preload_staged_libs), and return the path to the staged copy of
+    bmad_lib.
 
-    Why: dlopen()/ctypes.CDLL() resolves a shared library's own
-    dependencies (DT_NEEDED entries) by searching the SAME DIRECTORY as
-    the library itself — confirmed empirically, this is what actually
-    makes a plain conda-forge install "just work" with no env vars at
-    all, since GSL/LAPACK/etc. sit right next to libtao.so. Setting
-    LD_LIBRARY_PATH from Python (the previous approach here) does NOT
-    work: glibc's loader reads and caches that variable once at process
-    start, before any Python code runs, and never re-reads it for later
-    dlopen() calls — confirmed by testing the same scenario unfrozen,
-    with the change made both via os.environ at runtime (fails) and via
-    the OS environment before the process starts (works). So when a
-    user's dependencies are scattered across directories, the only
-    mechanism that reaches them is putting everything in one directory
-    ourselves before loading.
+    Why staging at all: dlopen()/ctypes.CDLL() resolves a shared
+    library's own dependencies (DT_NEEDED entries) by searching the SAME
+    DIRECTORY as the library itself — confirmed empirically, this is
+    what actually makes a plain conda-forge install "just work" with no
+    env vars at all, since GSL/LAPACK/etc. sit right next to libtao.so.
+    Setting LD_LIBRARY_PATH from Python (a previous approach here) does
+    NOT work: glibc's loader reads and caches that variable once at
+    process start, before any Python code runs, and never re-reads it
+    for later dlopen() calls — confirmed by testing the same scenario
+    unfrozen, with the change made both via os.environ at runtime
+    (fails) and via the OS environment before the process starts
+    (works). So when a user's dependencies are scattered across
+    directories, the only mechanism that reaches them is putting
+    everything in one directory ourselves before loading.
     """
     staging_dir = tempfile.mkdtemp(prefix='ranoptics_bmad_')
     bmad_lib = os.path.abspath(bmad_lib)
@@ -380,6 +423,7 @@ def _stage_bmad_lib(bmad_lib, extra_paths):
                     shutil.copy2(src, dst)
                 except OSError:
                     pass
+    _preload_staged_libs(staging_dir, os.path.basename(bmad_lib))
     return os.path.join(staging_dir, os.path.basename(bmad_lib))
 
 def _make_tao(cmd, bmad_lib=None, bmad_extra_paths=None):

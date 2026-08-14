@@ -2,6 +2,10 @@
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
+## [2.1.1] - 2026-08
+### Fixed
+- Tao/Bmad standalone build: fixed a library version conflict where a staged dependency (e.g. `libcurl.so.4`) could resolve against PyInstaller's own bundled copy of a same-named library (e.g. an older `libssl.so.3`, bundled for Python's `ssl` module) instead of the correct staged one, causing a symbol-version error at load time. Every staged Bmad library is now explicitly preloaded before `libtao.so` itself, so the correct versions are already resident by the time anything looks for them.
+
 ## [2.1.0] - 2026-08
 ### Added
 - Tao/Bmad backend now works in the standalone packaged executable. pytao is bundled directly; the actual compiled Bmad library (`libtao.so`/`.dylib`/`.dll`) is pointed at explicitly via two new fields in the GUI (shown when Tao is selected):
