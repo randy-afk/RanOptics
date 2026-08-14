@@ -2,6 +2,21 @@
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
+## [2.1.0] - 2026-08
+### Added
+- Tao/Bmad backend now works in the standalone packaged executable. pytao is bundled directly; the actual compiled Bmad library (`libtao.so`/`.dylib`/`.dll`) is pointed at explicitly via two new fields in the GUI (shown when Tao is selected):
+  - **Bmad library**: path to your installed `libtao.so`/`.dylib`/`.dll`.
+  - **Extra library dirs**: optional, comma-separated directories for libtao's own dependencies (GSL, LAPACK, FFTW3, HDF5, etc.), for installs where those aren't sitting next to the library itself (e.g. a hand-built Bmad, or one assembled from system packages instead of a single conda environment).
+  
+  Both are only needed inside the packaged executable — running from source with pytao/Bmad already on your environment needs neither.
+- Backend-availability check extended to validate the Bmad library path (and any extra dirs) exist before running.
+### Fixed
+- The Bmad library path mechanism above replaces an earlier, non-working approach: setting `LD_LIBRARY_PATH` from inside the running app did nothing (glibc reads and caches that variable once at process start, before any Python code runs — confirmed by testing the identical scenario with the change made mid-process vs. genuinely before the process starts). Library loading is now done by staging symlinks into one directory and loading from there, which is the mechanism confirmed to actually work via `dlopen()`'s own same-directory dependency search — verified end to end against a real Bmad lattice in an actual frozen build, not just an unfrozen sanity check.
+### Changed
+- ubuntu-latest CI runner is now Ubuntu 24.04; `libgl1-mesa-glx` (removed in 24.04) replaced with `libgl1` in the build workflow.
+- Build workflow matrix jobs no longer cancel each other on one platform's failure (`fail-fast: false`), and now have explicit `contents: write` permission for uploading release assets.
+- kaleido pinned to 1.2.0 in the build workflow: 1.3.0 has a submodule that crashes PyInstaller's dependency collection.
+
 ## [2.0.0] - 2026-08
 ### Fixed
 - Expression evaluator (`expr.py`) sandbox escape — dunder attribute access (e.g. `().__class__.__bases__`) could reach arbitrary Python classes from a preset file. Eval namespace is now AST-validated before evaluation.

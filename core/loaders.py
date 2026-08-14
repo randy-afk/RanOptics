@@ -4,7 +4,7 @@
 # =============================================================================
 
 from __future__ import annotations
-import math, os, re, subprocess, sys, tempfile
+import math, os, re, subprocess, tempfile
 from pathlib import Path
 import numpy as np
 
@@ -337,13 +337,85 @@ def _query_xsuite_attrs(tw, attrs, log_fn=None):
             result[attr] = np.zeros(len(tw.s))
     return result
 
-def load_tao(init_file, log_fn=None, progress_fn=None, tao=None):
+def _is_shared_lib_name(fname):
+    return '.so' in fname or fname.endswith('.dylib') or fname.endswith('.dll')
+
+def _stage_bmad_lib(bmad_lib, extra_paths):
+    """Stage symlinks (falling back to copies) to bmad_lib and every shared
+    library in extra_paths into one fresh temp directory, and return the
+    path to the staged copy of bmad_lib.
+
+    Why: dlopen()/ctypes.CDLL() resolves a shared library's own
+    dependencies (DT_NEEDED entries) by searching the SAME DIRECTORY as
+    the library itself — confirmed empirically, this is what actually
+    makes a plain conda-forge install "just work" with no env vars at
+    all, since GSL/LAPACK/etc. sit right next to libtao.so. Setting
+    LD_LIBRARY_PATH from Python (the previous approach here) does NOT
+    work: glibc's loader reads and caches that variable once at process
+    start, before any Python code runs, and never re-reads it for later
+    dlopen() calls — confirmed by testing the same scenario unfrozen,
+    with the change made both via os.environ at runtime (fails) and via
+    the OS environment before the process starts (works). So when a
+    user's dependencies are scattered across directories, the only
+    mechanism that reaches them is putting everything in one directory
+    ourselves before loading.
+    """
+    staging_dir = tempfile.mkdtemp(prefix='ranoptics_bmad_')
+    bmad_lib = os.path.abspath(bmad_lib)
+    for src_dir in [os.path.dirname(bmad_lib), *(os.path.abspath(p) for p in extra_paths)]:
+        if not src_dir or not os.path.isdir(src_dir):
+            continue
+        for fname in os.listdir(src_dir):
+            if not _is_shared_lib_name(fname):
+                continue
+            src = os.path.join(src_dir, fname)
+            dst = os.path.join(staging_dir, fname)
+            if os.path.exists(dst) or not os.path.isfile(src):
+                continue
+            try:
+                os.symlink(src, dst)
+            except OSError:
+                try:
+                    import shutil
+                    shutil.copy2(src, dst)
+                except OSError:
+                    pass
+    return os.path.join(staging_dir, os.path.basename(bmad_lib))
+
+def _make_tao(cmd, bmad_lib=None, bmad_extra_paths=None):
+    """Construct a pytao.Tao instance, optionally pointed at an explicit
+    Bmad shared library.
+
+    bmad_lib: optional explicit path to libtao.so/.dylib/.dll. Only needed
+    in the standalone packaged build. pytao's own auto-discovery
+    (ACC_ROOT_DIR / ctypes.util.find_library) works fine when running from
+    source with Bmad on the environment, but a frozen PyInstaller
+    executable has no RPATH into wherever Bmad is installed — so the
+    library must be pointed at explicitly, bypassing auto-discovery
+    entirely via pytao's own so_lib= parameter. See docs/installation.md.
+
+    bmad_extra_paths: optional list of additional directories to search
+    for libtao's own dependencies (GSL, LAPACK, FFTW3, HDF5, etc), for
+    cases where those aren't sitting next to bmad_lib itself.
+
+    bmad_lib always gets staged (see _stage_bmad_lib()) when given, even
+    with no extra paths — relying on "the dependencies happen to already
+    be next to bmad_lib" turned out to depend on unrelated import order
+    (e.g. whether numpy had already been imported and happened to pull in
+    an overlapping copy of some of the same dependencies) rather than
+    being guaranteed. Staging unconditionally makes this deterministic.
+    """
+    if bmad_lib:
+        bmad_lib = _stage_bmad_lib(bmad_lib, bmad_extra_paths or [])
+    from pytao import Tao
+    return Tao(cmd, so_lib=bmad_lib) if bmad_lib else Tao(cmd)
+
+def load_tao(init_file, log_fn=None, progress_fn=None, tao=None, bmad_lib=None, bmad_extra_paths=None):
     def L(m): (log_fn(m+'\n') if log_fn else print(m))
     def P(p,l): progress_fn(p,l) if progress_fn else None
-    from pytao import Tao
     P(5, 'Starting Tao...')
     if tao is None:
-        tao = Tao(f"-init {init_file} -noplot")
+        tao = _make_tao(f"-init {init_file} -noplot", bmad_lib=bmad_lib, bmad_extra_paths=bmad_extra_paths)
 
     # Parse init file for universe count and labels
     n_uni, uni_labels = _parse_tao_init(init_file)

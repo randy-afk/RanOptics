@@ -3,7 +3,7 @@
 # =============================================================================
 
 from __future__ import annotations
-import importlib.util, shutil
+import importlib.util, os, shutil
 import numpy as np
 
 from PySide6.QtCore    import Qt
@@ -19,9 +19,18 @@ def _t(): return _th
 
 # ── Backend availability ─────────────────────────────────────────────────────
 
-def check_backend_ready(code):
+def check_backend_ready(code, bmad_lib=None, bmad_extra_paths=None):
     """Check whether the backend for `code` is actually usable before
     attempting to load a file with it.
+
+    bmad_lib: optional explicit path to libtao.so/.dylib/.dll (see the
+    "Bmad library" field). Only needed in the standalone packaged build,
+    which can't auto-discover an installed Bmad the way running from
+    source can — see load_tao()'s bmad_lib parameter.
+
+    bmad_extra_paths: optional list of additional directories for
+    libtao's own dependencies (see the "Extra library dirs" field and
+    load_tao()'s bmad_extra_paths parameter).
 
     Returns None if ready, or a user-facing message describing what's
     missing. MAD-X needs no check — RanOptics only parses its output files
@@ -33,6 +42,14 @@ def check_backend_ready(code):
                      "pytao is not installed (or its Bmad shared libraries "
                      "aren't on the library path). Install pytao and Bmad, "
                      "then restart RanOptics. See docs/installation.md.")
+        if bmad_lib and not os.path.isfile(bmad_lib):
+            return (f"Bmad library not found at:\n{bmad_lib}\n\n"
+                     "Check the path in the \"Bmad library\" field, or clear "
+                     "it to fall back to automatic discovery.")
+        _bad_extra = [d for d in (bmad_extra_paths or []) if not os.path.isdir(d)]
+        if _bad_extra:
+            return ("Extra library dir(s) not found:\n" + "\n".join(_bad_extra) +
+                     "\n\nCheck the \"Extra library dirs\" field.")
     elif code == 'elegant':
         missing = [exe for exe in ('elegant', 'sddsconvert') if shutil.which(exe) is None]
         if missing:
@@ -174,6 +191,12 @@ def _parse_yrange(text):
         return [float(parts[0].strip()), float(parts[1].strip())]
     except (ValueError, AttributeError):
         return ''
+
+def _parse_extra_paths(text):
+    """Parse a comma-separated directory list into a list of stripped,
+    non-empty paths. Returns [] for blank input."""
+    if not text: return []
+    return [p.strip() for p in text.split(',') if p.strip()]
 
 # ── Log line classifier ───────────────────────────────────────────────────────
 

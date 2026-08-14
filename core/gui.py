@@ -25,7 +25,7 @@ from core.themes import (
 from core.utils import (
     _clf, _make_scroll_widget, check_backend_ready,
     _sec, _card, _row, _lbl, _ent, _btn, _chk, _dd, _hint, _help, _rb,
-    _parse_yrange, _parse_fp_range,
+    _parse_yrange, _parse_fp_range, _parse_extra_paths,
 )
 from core.engine import plot_optics
 from core.loaders import load_tao, load_elegant, load_xsuite, load_madx, _parse_tao_init
@@ -191,7 +191,7 @@ class RanOpticsGUI(QMainWindow):
         self._hdr_opt.setStyleSheet(f"color: {_th.FG}; background: transparent;")
         nr.addWidget(self._hdr_ran); nr.addWidget(self._hdr_opt); nr.addStretch()
         tv.addWidget(name_row)
-        self._hdr_sub = QLabel("Accelerator Optics Plotter  ·  v2.0.0"); self._hdr_sub.setFont(FONT_MONO)
+        self._hdr_sub = QLabel("Accelerator Optics Plotter  ·  v2.1.0"); self._hdr_sub.setFont(FONT_MONO)
         self._hdr_sub.setStyleSheet(f"color: {_th.FG_DIM}; background: transparent; border-bottom: 1px solid {_th.COPPER}; padding-bottom: 1px;")
         tv.addWidget(self._hdr_sub)
         row.addWidget(txt)
@@ -819,7 +819,7 @@ class RanOpticsGUI(QMainWindow):
 
         r = _row(layout); _lbl(r, "Code backend")
         self.w_code = _dd(r, ["tao", "elegant", "xsuite", "madx"], width=110)
-        self.w_code.currentTextChanged.connect(lambda _: (self._update_xsuite_rows(), self._update_madx_rows()))
+        self.w_code.currentTextChanged.connect(lambda _: (self._update_xsuite_rows(), self._update_madx_rows(), self._update_tao_rows()))
         _help(layout, "Auto-detected from file extension. Override here if needed.")
 
         # xsuite extra rows (hidden initially)
@@ -843,6 +843,25 @@ class RanOpticsGUI(QMainWindow):
         _help(mv, "MAD-X SURVEY output. Leave blank to use dead-reckoning for floor plan.")
         layout.addWidget(self._madx_widget)
         self._madx_widget.hide()
+
+        # Tao extra row — explicit Bmad library path (hidden until tao selected)
+        self._tao_widget = QWidget(); self._tao_widget.setStyleSheet("background: transparent;")
+        tv = QVBoxLayout(self._tao_widget); tv.setContentsMargins(0, 0, 0, 0); tv.setSpacing(0)
+        rt = _row(tv); _lbl(rt, "Bmad library (.so)")
+        self.w_bmad_lib = _ent(rt, width=200, placeholder="optional — only needed in the standalone build")
+        _btn(rt, "Browse", self._browse_bmad_lib, width=70)
+        _help(tv, "Path to libtao.so/.dylib/.dll. Leave blank when running from source with "
+                  "pytao/Bmad already on your environment — only needed inside the packaged executable, "
+                  "which can't auto-discover an installed Bmad the way running from source can.")
+        rte = _row(tv); _lbl(rte, "Extra library dirs")
+        self.w_bmad_extra = _ent(rte, width=280, placeholder="optional, comma-separated")
+        _help(tv, "Only needed if libtao's own dependencies (GSL, LAPACK, FFTW3, HDF5, etc.) "
+                  "aren't sitting next to the library above — e.g. a hand-built Bmad or one "
+                  "assembled from system packages instead of a single conda environment.")
+        layout.addWidget(self._tao_widget)
+        self._tao_widget.hide()
+        self._update_tao_rows()  # 'tao' is the default backend, so sync visibility now —
+                                  # currentTextChanged won't fire for a value that's already selected
 
         # Universe selector (hidden initially)
         self._uni_widget = QWidget(); self._uni_widget.setStyleSheet("background: transparent;")
@@ -1928,6 +1947,7 @@ class RanOpticsGUI(QMainWindow):
         elif ext == '.tfs':   self.w_code.setCurrentText('madx')
         self._update_xsuite_rows()
         self._update_madx_rows()
+        self._update_tao_rows()
 
     def _update_xsuite_rows(self):
         if not hasattr(self, '_xsuite_widget'): return
@@ -1942,6 +1962,13 @@ class RanOpticsGUI(QMainWindow):
             self._madx_widget.show()
         else:
             self._madx_widget.hide()
+
+    def _update_tao_rows(self):
+        if not hasattr(self, '_tao_widget'): return
+        if self.w_code.currentText() == 'tao':
+            self._tao_widget.show()
+        else:
+            self._tao_widget.hide()
 
     def _update_universe_selector(self, path):
         # Clear existing checkboxes and label edits
@@ -2053,6 +2080,13 @@ class RanOpticsGUI(QMainWindow):
             options=QFileDialog.DontUseNativeDialog)
         if f: self.w_madx_survey.setText(f)
 
+    def _browse_bmad_lib(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select Bmad shared library", "",
+            "Shared libraries (*.so *.dylib *.dll);;All files (*.*)",
+            options=QFileDialog.DontUseNativeDialog)
+        if f: self.w_bmad_lib.setText(f)
+
     def _browse_tunnel(self):
         f, _ = QFileDialog.getOpenFileName(
             self, "Select tunnel wall file", "",
@@ -2114,6 +2148,8 @@ class RanOpticsGUI(QMainWindow):
             universes=self._get_selected_universes(),
             uni_label_overrides=self._get_uni_label_overrides(),
             madx_survey=self.w_madx_survey.text().strip() or None,
+            bmad_lib=self.w_bmad_lib.text().strip() or None,
+            bmad_extra_paths=_parse_extra_paths(self.w_bmad_extra.text().strip()),
             show_tune=self.w_show_tune.isChecked(),
             show_tunnel=self.w_show_tunnel.isChecked(),
             tunnel_wall_file=self.w_tunnel_file.text().strip() or None,
@@ -2144,7 +2180,7 @@ class RanOpticsGUI(QMainWindow):
         try: kwargs = self._collect_kwargs()
         except (ValueError, TypeError) as e:
             QMessageBox.critical(self, "Configuration Error", str(e)); return
-        _missing = check_backend_ready(kwargs['code'])
+        _missing = check_backend_ready(kwargs['code'], kwargs.get('bmad_lib'), kwargs.get('bmad_extra_paths'))
         if _missing:
             QMessageBox.critical(self, "Backend Not Found", _missing); return
 
@@ -2225,7 +2261,7 @@ class RanOpticsGUI(QMainWindow):
         try: kwargs = self._collect_kwargs()
         except (ValueError, TypeError) as e:
             QMessageBox.critical(self, "Configuration Error", str(e)); return
-        _missing = check_backend_ready(kwargs['code'])
+        _missing = check_backend_ready(kwargs['code'], kwargs.get('bmad_lib'), kwargs.get('bmad_extra_paths'))
         if _missing:
             QMessageBox.critical(self, "Backend Not Found", _missing); return
 
@@ -2237,7 +2273,8 @@ class RanOpticsGUI(QMainWindow):
             try:
                 code = kwargs['code']; inp = kwargs['input_file']
                 log = lambda m: self._sig_log.emit(m, "info")
-                if code == 'tao':      data = load_tao(inp, log_fn=log)
+                if code == 'tao':      data = load_tao(inp, log_fn=log, bmad_lib=kwargs.get('bmad_lib'),
+                                                        bmad_extra_paths=kwargs.get('bmad_extra_paths'))
                 elif code == 'xsuite': data = load_xsuite(inp, log_fn=log)
                 elif code == 'madx':   data = load_madx(inp, survey_file=kwargs.get('madx_survey'), log_fn=log)
                 else:                  data = load_elegant(inp, log_fn=log)
@@ -2258,7 +2295,7 @@ class RanOpticsGUI(QMainWindow):
         try: kwargs = self._collect_kwargs()
         except (ValueError, TypeError) as e:
             QMessageBox.critical(self, "Configuration Error", str(e)); return
-        _missing = check_backend_ready(kwargs['code'])
+        _missing = check_backend_ready(kwargs['code'], kwargs.get('bmad_lib'), kwargs.get('bmad_extra_paths'))
         if _missing:
             QMessageBox.critical(self, "Backend Not Found", _missing); return
         # Use the base name from the field, trigger via save_csv flag
@@ -2432,6 +2469,8 @@ class RanOpticsGUI(QMainWindow):
             'show_titles':     self.w_show_titles.isChecked(),
             'panel_spacing':   self.w_panel_spacing.text().strip(),
             'madx_survey':     self.w_madx_survey.text().strip(),
+            'bmad_lib':        self.w_bmad_lib.text().strip(),
+            'bmad_extra_paths': self.w_bmad_extra.text().strip(),
             'elem_colors':     dict(self._elem_colors),
             'shared_xaxis':    self.w_shared_xaxis.isChecked(),
             'grid_enabled':    self._grid_enabled,
@@ -2463,7 +2502,7 @@ class RanOpticsGUI(QMainWindow):
             'fs_axis': '', 'fs_tick': '', 'fs_title': '', 'fs_annot': '', 'fs_legend': '',
             'show_xz': True, 'show_yz': True, 'equal_aspect': False,
             'show_titles': True, 'panel_spacing': '80', 'madx_survey': '',
-            'elem_colors': {}, 'shared_xaxis': True,
+            'bmad_lib': '', 'bmad_extra_paths': '', 'elem_colors': {}, 'shared_xaxis': True,
             'grid_enabled': False, 'cell_srange_on': False, 'grid_size': '2x2',
         }
 
@@ -2507,6 +2546,8 @@ class RanOpticsGUI(QMainWindow):
         _sc(self.w_show_titles, 'show_titles')
         _st(self.w_panel_spacing, 'panel_spacing')
         if 'madx_survey' in data: self.w_madx_survey.setText(str(data.get('madx_survey', '')))
+        if 'bmad_lib' in data: self.w_bmad_lib.setText(str(data.get('bmad_lib', '')))
+        if 'bmad_extra_paths' in data: self.w_bmad_extra.setText(str(data.get('bmad_extra_paths', '')))
 
         if 'emit_type' in data:
             is_norm = str(data['emit_type']).lower() == 'normalized'

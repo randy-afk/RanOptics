@@ -10,7 +10,7 @@ import numpy as np
 from core.utils import _parse_fp_range, panel_title
 from core.loaders import (
     load_tao, load_elegant, load_madx, load_xsuite,
-    _parse_tao_init, _load_tao_universe, _read_tfs,
+    _parse_tao_init, _load_tao_universe, _read_tfs, _make_tao,
 )
 from core.panels import (
     _build_floor_plan, _build_floor_plan_yz,
@@ -78,7 +78,7 @@ def _lock_floor_aspect(fig, row, col=1):
         pass
 def _load_one(input_file, code, log_fn=None, progress_fn=None,
               xsuite_twiss='4d', xsuite_line=None, universes=None,
-              madx_survey=None):
+              madx_survey=None, bmad_lib=None, bmad_extra_paths=None):
     """Load one lattice file and return (data, tao_instance).
 
     data has the standard keys: s, beta_a, beta_b, eta_x, eta_y,
@@ -90,8 +90,8 @@ def _load_one(input_file, code, log_fn=None, progress_fn=None,
     code = code.lower()
     tao_instance = None
     if code == 'tao':
-        from pytao import Tao
-        tao_instance = Tao(f'-init {input_file} -noplot')
+        tao_instance = _make_tao(f'-init {input_file} -noplot', bmad_lib=bmad_lib,
+                                 bmad_extra_paths=bmad_extra_paths)
         data = load_tao(input_file, log_fn, progress_fn=progress_fn,
                         tao=tao_instance)
         data['_tao'] = tao_instance
@@ -356,6 +356,8 @@ def plot_optics(
     xsuite_twiss='4d', xsuite_line=None,
     universes=None,
     madx_survey=None,
+    bmad_lib=None,   # explicit path to libtao.so/.dylib/.dll — only needed in the standalone packaged build
+    bmad_extra_paths=None,  # extra dirs for libtao's own dependencies, if not next to bmad_lib itself
     uni_label_overrides=None,  # {universe_index: 'custom label'} to override auto-detected labels
     show_tune=False,
     tunnel_wall_file=None,
@@ -447,7 +449,8 @@ def plot_optics(
     data, _tao_instance, _all_uni_data, _uni_labels, _plot_unis = _load_one(
         input_file, code, log_fn=log_fn, progress_fn=progress_fn,
         xsuite_twiss=xsuite_twiss, xsuite_line=xsuite_line,
-        universes=universes, madx_survey=madx_survey)
+        universes=universes, madx_survey=madx_survey, bmad_lib=bmad_lib,
+        bmad_extra_paths=bmad_extra_paths)
     # Apply user-defined label overrides
     if uni_label_overrides:
         for uid, lbl in uni_label_overrides.items():
