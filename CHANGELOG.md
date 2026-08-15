@@ -2,6 +2,10 @@
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
+## [2.1.3] - 2026-08
+### Fixed
+- Linux standalone build: the OpenSSL bundling step added in 2.1.2 failed in CI, so no Linux executable was produced. conda-forge's `openssl` package now resolves to 4.0.x, which ships `libssl.so.4`/`libcrypto.so.4`, but the build specifically needs SONAME `libssl.so.3` — that's what both Python's `_ssl` and Bmad's `libcurl.so.4` are linked against, and a 4.x copy satisfies neither. Pinned to `openssl>=3.2,<4` (currently 3.6.3, which carries the `OPENSSL_3.2.0` symbols libcurl needs) and added explicit existence checks so any future mismatch fails at the fetch step with a clear message instead of part-way through the build. No application code changed from 2.1.2.
+
 ## [2.1.2] - 2026-08
 ### Fixed
 - Tao/Bmad standalone build: the v2.1.1 preload fix didn't actually work — root-caused by directly inspecting a real failing process. Python's own `ssl`/`hashlib` modules load PyInstaller's bundled `libssl.so.3` (capped at symbol version `OPENSSL_3.0.x`, from the CI runner's system OpenSSL) automatically, before the app window even appears, which permanently claims that library's SONAME for the whole process. By the time Run is clicked, no amount of preloading a newer copy for Tao's benefit can dislodge it, since the dynamic linker already resolved that SONAME. Confirmed by direct reproduction (forcing the exact load order) and fixed at the source: the Linux build now bundles conda-forge's own OpenSSL (the same distribution Bmad itself is built against) in place of the runner's system copy, so whichever loads first is already new enough for both Python and Bmad. Verified end to end against a real Bmad lattice in an actual frozen build, including deliberately forcing `ssl` to load first to reproduce the exact failure ordering.

@@ -92,10 +92,18 @@ jobs:
         # itself is built against) and overriding PyInstaller's bundled copy
         # with --add-binary means whichever loads first is already new
         # enough for both Python and Bmad, so there's no race to lose.
+        #
+        # The version pin matters: conda-forge's `openssl` now resolves to
+        # 4.0.x, which ships libssl.so.4/libcrypto.so.4. We specifically need
+        # SONAME libssl.so.3, because that's what both Python's _ssl and
+        # Bmad's libcurl.so.4 are linked against — a 4.x copy satisfies
+        # neither. >=3.2 guarantees the OPENSSL_3.2.0 symbols libcurl needs.
         if: runner.os == 'Linux'
         run: |
           curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj bin/micromamba
-          ./bin/micromamba create -p ./openssl_env -c conda-forge openssl -y
+          ./bin/micromamba create -p ./openssl_env -c conda-forge "openssl>=3.2,<4" -y
+          test -f ./openssl_env/lib/libssl.so.3
+          test -f ./openssl_env/lib/libcrypto.so.3
 
       - name: Build Executable with PyInstaller
         shell: bash

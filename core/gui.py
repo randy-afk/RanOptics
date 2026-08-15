@@ -191,7 +191,7 @@ class RanOpticsGUI(QMainWindow):
         self._hdr_opt.setStyleSheet(f"color: {_th.FG}; background: transparent;")
         nr.addWidget(self._hdr_ran); nr.addWidget(self._hdr_opt); nr.addStretch()
         tv.addWidget(name_row)
-        self._hdr_sub = QLabel("Accelerator Optics Plotter  ·  v2.1.2"); self._hdr_sub.setFont(FONT_MONO)
+        self._hdr_sub = QLabel("Accelerator Optics Plotter  ·  v2.1.3"); self._hdr_sub.setFont(FONT_MONO)
         self._hdr_sub.setStyleSheet(f"color: {_th.FG_DIM}; background: transparent; border-bottom: 1px solid {_th.COPPER}; padding-bottom: 1px;")
         tv.addWidget(self._hdr_sub)
         row.addWidget(txt)
