@@ -20,6 +20,69 @@ RanOptics launches a live Tao instance in the background. This means:
 
 When your `.init` file defines multiple universes, RanOptics detects them automatically. Use the universe selector to choose which universes to plot and how to display them.
 
+### Pointing RanOptics at your Bmad library
+
+Two extra fields appear when Tao is selected: **Bmad library** and **Extra library dirs**.
+
+You only need them in the **standalone executable**. Running from source, with `pytao` and Bmad already on your environment, both can stay blank: Python finds the library the same way it always does. The packaged executable is isolated from your Python environment, so it cannot auto-discover an installed Bmad and has to be told where it is.
+
+#### Finding `libtao.so`
+
+If Bmad came from conda-forge (the usual case), it sits in your environment's `lib` directory. With that environment **activated**:
+
+```bash
+ls "$CONDA_PREFIX"/lib/libtao.so
+```
+
+!!! warning "Activate the environment first"
+    `$CONDA_PREFIX` is empty when no environment is active, so the command above quietly checks `/lib/libtao.so` and reports "No such file" even when Bmad is installed. If you see that, run `conda activate` first, or name the path explicitly:
+
+    ```bash
+    ls ~/miniforge3/envs/YOUR_ENV/lib/libtao.so
+    ```
+
+Still not found, search the likely roots:
+
+```bash
+find ~ /opt /usr/local -name 'libtao.so*' 2>/dev/null
+```
+
+Or ask the dynamic linker, if the library is on the system path:
+
+```bash
+ldconfig -p | grep libtao
+```
+
+On macOS look for `libtao.dylib`, on Windows `libtao.dll`. Paste the full path into **Bmad library**.
+
+#### When you also need Extra library dirs
+
+Leave this blank first and try a run. It is only needed when libtao's own dependencies (GSL, LAPACK, FFTW3, HDF5 and friends) are *not* sitting next to `libtao.so`, which happens with a hand-built Bmad or one assembled from system packages rather than a single conda environment.
+
+To see whether anything is missing, ask what libtao can't resolve:
+
+```bash
+ldd /path/to/libtao.so | grep 'not found'
+```
+
+Every line printed is a dependency RanOptics can't reach. Locate each one and add its directory to **Extra library dirs**, comma-separated:
+
+```bash
+find / -name 'libgsl.so*' 2>/dev/null
+```
+
+A clean conda install prints nothing from the `ldd` check, which means the field can stay empty.
+
+#### Both fields are remembered
+
+They are saved to `~/.ranoptics_settings.json` as soon as you finish editing them, and restored automatically the next time the app starts. You enter them once, not every launch. They are deliberately kept out of presets, since a path into your local Bmad install means nothing on another machine.
+
+#### What happens under the hood
+
+RanOptics reads `libtao.so`'s dependency list, follows it recursively, and gathers the library plus everything it genuinely needs into a single directory under your system temp folder, named `ranoptics_bmad_<id>`. This is what makes a scattered install work: the loader resolves a library's dependencies from its own directory, so putting them together is what lets it find them.
+
+That directory is reused across runs and sessions, and rebuilt automatically if you move or upgrade your Bmad install. Deleting it is harmless, it is recreated on the next run.
+
 ---
 
 ## ELEGANT

@@ -951,6 +951,39 @@ def _make_elem_name_array(s, elements):
         names[mask] = ename
     return names
 
+# Cosmetic line smoothing for optics curves, set once per figure build by
+# plot_optics(). Deliberately module-level rather than threaded through ~10
+# builder signatures and 14 call sites: it's a pure display setting applying
+# uniformly to every optics curve, and figure builds never overlap (the Run
+# button is disabled for the duration of one).
+#
+# Cosmetic is the operative word. This interpolates between computed points
+# with no knowledge of the underlying optics, so it can overshoot near a
+# waist and rounds off genuine discontinuities (α really does jump at a thin
+# quad). It is off by default and must stay that way.
+_LINE_SMOOTHING = {'shape': 'linear', 'smoothing': None}
+
+def _set_line_smoothing(enabled, amount=1.0):
+    """Configure cosmetic spline smoothing for optics curves (plotly caps at 1.3)."""
+    if enabled:
+        try:
+            amt = float(amount)
+        except (TypeError, ValueError):
+            amt = 1.0
+        _LINE_SMOOTHING['shape'] = 'spline'
+        _LINE_SMOOTHING['smoothing'] = max(0.0, min(1.3, amt))
+    else:
+        _LINE_SMOOTHING['shape'] = 'linear'
+        _LINE_SMOOTHING['smoothing'] = None
+
+def _line_kw(color, **extra):
+    """Build the line=dict(...) for an optics curve, honoring the smoothing setting."""
+    kw = dict(color=color, **extra)
+    if _LINE_SMOOTHING['shape'] == 'spline':
+        kw['shape'] = 'spline'
+        kw['smoothing'] = _LINE_SMOOTHING['smoothing']
+    return kw
+
 def _dot_trace(fig, x, y, name, color, legend_name, legendgroup, row, col,
                hovertemplate='', secondary_y=False, customdata=None):
     """Add a line trace using a colored dot as the legend symbol."""
@@ -967,7 +1000,7 @@ def _dot_trace(fig, x, y, name, color, legend_name, legendgroup, row, col,
         ht = hovertemplate.replace('<extra></extra>', '<br>%{customdata}<extra></extra>')
         fig.add_trace(go.Scatter(
             x=x, y=y, name=name, mode='lines',
-            line=dict(color=color),
+            line=_line_kw(color),
             customdata=customdata,
             legend=legend_name, legendgroup=legendgroup, showlegend=False,
             hovertemplate=ht),
@@ -975,7 +1008,7 @@ def _dot_trace(fig, x, y, name, color, legend_name, legendgroup, row, col,
     else:
         fig.add_trace(go.Scatter(
             x=x, y=y, name=name, mode='lines',
-            line=dict(color=color),
+            line=_line_kw(color),
             legend=legend_name, legendgroup=legendgroup, showlegend=False,
             hovertemplate=hovertemplate),
             row=row, col=col, **({'secondary_y': secondary_y} if secondary_y is not None else {}))

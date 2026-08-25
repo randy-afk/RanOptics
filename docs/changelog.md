@@ -2,6 +2,20 @@
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
+## [2.2.0] - 2026-08
+### Added
+- **App themes.** Five colour themes (Petrol, Classic Green, Sulfur Sea, Ultraviolet, Oxblood), each with matched light and dark palettes. Picker sits in the header beside the existing light/dark toggle; both apply live, no restart. Theme and mode persist between sessions. Petrol is the new default. Every palette assigns colours to fixed roles (primary action, secondary action, section label, alert) rather than using them decoratively, which is what keeps a multi-colour theme readable.
+- **Bmad library paths are remembered.** The "Bmad library" and "Extra library dirs" fields save to `~/.ranoptics_settings.json` and are restored automatically at startup, so they no longer have to be re-entered every launch.
+- **Curve smoothing.** Optional spline interpolation of optics curves ("Smooth curves" in Appearance → Display, with an adjustable amount). Display-only and off by default: it interpolates between computed points without any knowledge of the physics, so it can overshoot near a waist and rounds off genuine discontinuities. Floor-plan and beamline-bar geometry is never smoothed, and CSV export is unaffected.
+### Changed
+- **Bmad staging now follows the real dependency closure.** Previously every shared library in the source directories was staged, which on a typical conda install meant ~1200 files for a library that needs 18, including 240 Qt6 libraries pulled into a process already running PySide6. `libtao.so`'s `DT_NEEDED` entries are now walked recursively and only what's actually required is staged, about 39 files. Parsed directly from the ELF header rather than shelling out to `ldd`/`objdump`, which aren't guaranteed present on a machine running the packaged binary. Non-ELF platforms (macOS `.dylib`, Windows `.dll`) keep the previous behaviour.
+- **Bmad paths are no longer stored in presets.** They're machine-specific, so a preset containing a local library path was meaningless on another machine, and loading any preset would wipe the saved path. They now live only in the settings file.
+- Documentation site restyled to a Petrol-family palette, deliberately offset from the application's own so screenshots keep a visible edge against the page. Content images now get an explicit border and shadow.
+### Fixed
+- **Staging directories no longer accumulate.** `_stage_bmad_lib` created a fresh temp directory on every Tao load and never removed it, leaving one behind per Run click indefinitely. Staging now reuses one stable directory per library/extra-dirs combination, rebuilt automatically if the install moves or a symlink breaks.
+- Light-mode contrast: white button text on the green accent scored 3.77 against the 4.5 minimum for body text, and section labels failed on three palettes. All themes now pass 4.5 in both modes for button text, section labels, help text and body text.
+- The light GUI palette was previously only reachable through the header toggle and had no counterpart for any other theme; every theme now has a proper light sibling.
+
 ## [2.1.3] - 2026-08
 ### Fixed
 - Linux standalone build: the OpenSSL bundling step added in 2.1.2 failed in CI, so no Linux executable was produced. conda-forge's `openssl` package now resolves to 4.0.x, which ships `libssl.so.4`/`libcrypto.so.4`, but the build specifically needs SONAME `libssl.so.3` — that's what both Python's `_ssl` and Bmad's `libcurl.so.4` are linked against, and a 4.x copy satisfies neither. Pinned to `openssl>=3.2,<4` (currently 3.6.3, which carries the `OPENSSL_3.2.0` symbols libcurl needs) and added explicit existence checks so any future mismatch fails at the fetch step with a clear message instead of part-way through the build. No application code changed from 2.1.2.

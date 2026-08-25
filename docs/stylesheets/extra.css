@@ -1,6 +1,69 @@
-[data-md-color-primary="custom"] {
-  --md-primary-fg-color: #234038;
-  --md-primary-fg-color--light: #2e5247;
-  --md-primary-fg-color--dark: #1a2e28;
-  --md-typeset-a-color: #00e676;
+/* ---------------------------------------------------------------------------
+   RanOptics documentation theme — Petrol family.
+
+   Deliberately NOT the same values as the application's Petrol theme. The app's
+   dark ground is #0b1618; the page ground here is #1e383d, several steps
+   lighter. That gap is what keeps a screenshot of the app reading as a distinct
+   object on the page instead of blending into it. Accent colours are shared
+   with the app so the two still feel like one product.
+   --------------------------------------------------------------------------- */
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color:          #1e383d;
+  --md-default-bg-color--light:   #254349;
+  --md-default-bg-color--lighter: #2b4c52;
+  --md-default-fg-color:          #e2eff0;
+  --md-default-fg-color--light:   #a9c3c5;
+  --md-default-fg-color--lighter: #7b9a9d;
+  --md-default-fg-color--lightest:#4d6a6d;
+
+  --md-code-bg-color:             #16292d;
+  --md-code-fg-color:             #d8ebec;
+
+  --md-typeset-a-color:           #22e39c;
+  --md-typeset-color:             #e2eff0;
+
+  --md-footer-bg-color:           #16292d;
+  --md-footer-bg-color--dark:     #0b1618;
 }
+
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color:        #0d3b3c;
+  --md-primary-fg-color--light: #14504f;
+  --md-primary-fg-color--dark:  #082a2b;
+  --md-primary-bg-color:        #eaf6f6;
+  --md-primary-bg-color--light: #b9d9da;
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color:         #4fecb3;
+  --md-accent-fg-color--transparent: rgba(79,236,179,.12);
+  --md-accent-bg-color:         #04150d;
+}
+
+/* Section headings pick up the gold used for section labels in the app. */
+.md-typeset h2 { color: #ffcb5c; }
+.md-typeset h3 { color: #9fd8c4; }
+
+/* ---------------------------------------------------------------------------
+   Screenshot framing.
+
+   Palette separation alone can't guarantee a visible edge on every image, so
+   frame them explicitly. Scoped to content images only: the header logo lives
+   outside .md-typeset, and inline icons are rendered as SVG rather than <img>,
+   so neither is affected.
+   --------------------------------------------------------------------------- */
+.md-typeset img:not(.emojione):not(.twemoji):not(.gemoji) {
+  border: 1px solid #3a626a;
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .38);
+  max-width: 100%;
+  height: auto;
+}
+
+/* Code blocks sit slightly darker than the page so they read as insets. */
+.md-typeset pre > code { border: 1px solid #2b4c52; border-radius: 8px; }
+
+/* Tables: quieter borders than the Material default on this ground. */
+.md-typeset table:not([class]) { border: 1px solid #2b4c52; border-radius: 8px; }
+.md-typeset table:not([class]) th { background: #254349; color: #e2eff0; }

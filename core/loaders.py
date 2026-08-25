@@ -340,6 +340,87 @@ def _query_xsuite_attrs(tw, attrs, log_fn=None):
 def _is_shared_lib_name(fname):
     return '.so' in fname or fname.endswith('.dylib') or fname.endswith('.dll')
 
+def _elf_needed(path):
+    """Return the DT_NEEDED sonames of an ELF shared library, or None if the
+    file isn't parseable as one.
+
+    Parsed by hand instead of shelling out to ldd/objdump/readelf: this code
+    path exists to serve the standalone executable, and binutils isn't
+    guaranteed to be present on a machine that only ever runs the packaged
+    binary. Returning None rather than raising lets the caller fall back to a
+    coarser strategy for non-ELF files (.dylib/.dll) and anything unexpected.
+    """
+    import struct
+    try:
+        with open(path, 'rb') as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    if len(data) < 64 or data[:4] != b'\x7fELF':
+        return None
+    is64 = data[4] == 2
+    end = '<' if data[5] == 1 else '>'
+
+    def u(fmt, off):
+        return struct.unpack_from(end + fmt, data, off)[0]
+
+    try:
+        if is64:
+            e_phoff, e_phentsize, e_phnum = u('Q', 0x20), u('H', 0x36), u('H', 0x38)
+        else:
+            e_phoff, e_phentsize, e_phnum = u('I', 0x1C), u('H', 0x2A), u('H', 0x2C)
+
+        loads, dyn = [], None
+        for i in range(e_phnum):
+            off = e_phoff + i * e_phentsize
+            p_type = u('I', off)
+            if is64:
+                p_off, p_va, p_fsz = u('Q', off + 8), u('Q', off + 16), u('Q', off + 32)
+            else:
+                p_off, p_va, p_fsz = u('I', off + 4), u('I', off + 8), u('I', off + 16)
+            if p_type == 1:      # PT_LOAD
+                loads.append((p_va, p_fsz, p_off))
+            elif p_type == 2:    # PT_DYNAMIC
+                dyn = (p_off, p_fsz)
+        if dyn is None:
+            return None
+
+        # DT_STRTAB is a virtual address; map it back to a file offset.
+        def va_to_off(va):
+            for v, sz, o in loads:
+                if v <= va < v + sz:
+                    return va - v + o
+            return None
+
+        step = 16 if is64 else 8
+        tfmt = 'Q' if is64 else 'I'
+        needed, strtab_va = [], None
+        off, stop = dyn[0], dyn[0] + dyn[1]
+        while off + step <= stop:
+            d_tag, d_val = u(tfmt, off), u(tfmt, off + step // 2)
+            if d_tag == 0:       # DT_NULL
+                break
+            if d_tag == 1:       # DT_NEEDED
+                needed.append(d_val)
+            elif d_tag == 5:     # DT_STRTAB
+                strtab_va = d_val
+            off += step
+        if strtab_va is None:
+            return None
+        strtab = va_to_off(strtab_va)
+        if strtab is None:
+            return None
+
+        out = []
+        for n in needed:
+            s = strtab + n
+            e = data.find(b'\x00', s)
+            if e > s:
+                out.append(data[s:e].decode('utf-8', 'replace'))
+        return out
+    except Exception:
+        return None
+
 def _preload_staged_libs(staging_dir, skip_basename):
     """Explicitly dlopen() every staged library except skip_basename,
     before libtao.so itself gets loaded.
@@ -383,10 +464,17 @@ def _preload_staged_libs(staging_dir, skip_basename):
             break
 
 def _stage_bmad_lib(bmad_lib, extra_paths):
-    """Stage symlinks (falling back to copies) to bmad_lib and every shared
-    library in extra_paths into one fresh temp directory, preload them
-    (see _preload_staged_libs), and return the path to the staged copy of
-    bmad_lib.
+    """Stage symlinks (falling back to copies) to bmad_lib and its actual
+    dependency closure into one fresh temp directory, preload them (see
+    _preload_staged_libs), and return the path to the staged copy of bmad_lib.
+
+    Only libraries libtao.so genuinely needs are staged, resolved by walking
+    DT_NEEDED entries recursively (see _elf_needed). An earlier version swept
+    in every shared library sitting in the source directories, which on a real
+    conda install meant ~1200 files for a library that needs 18 — including
+    240 Qt6 libraries pulled into a process already running PySide6, and
+    duplicate libssl/libcrypto copies of exactly the kind that caused the
+    OPENSSL_3.2.0 SONAME conflict this module already had to work around.
 
     Why staging at all: dlopen()/ctypes.CDLL() resolves a shared
     library's own dependencies (DT_NEEDED entries) by searching the SAME
@@ -403,28 +491,72 @@ def _stage_bmad_lib(bmad_lib, extra_paths):
     directories, the only mechanism that reaches them is putting
     everything in one directory ourselves before loading.
     """
-    staging_dir = tempfile.mkdtemp(prefix='ranoptics_bmad_')
+    import hashlib, shutil
     bmad_lib = os.path.abspath(bmad_lib)
-    for src_dir in [os.path.dirname(bmad_lib), *(os.path.abspath(p) for p in extra_paths)]:
-        if not src_dir or not os.path.isdir(src_dir):
-            continue
-        for fname in os.listdir(src_dir):
-            if not _is_shared_lib_name(fname):
-                continue
-            src = os.path.join(src_dir, fname)
-            dst = os.path.join(staging_dir, fname)
-            if os.path.exists(dst) or not os.path.isfile(src):
-                continue
+    cand_dirs = [d for d in [os.path.dirname(bmad_lib),
+                             *(os.path.abspath(p) for p in extra_paths)]
+                 if d and os.path.isdir(d)]
+
+    # One stable directory per (library, extra dirs) combination, reused across
+    # runs and across sessions. An earlier version called mkdtemp() on every
+    # single Tao load, which left a new directory behind per Run click, forever.
+    key = hashlib.sha1('\0'.join([bmad_lib] + sorted(cand_dirs)).encode()).hexdigest()[:12]
+    staging_dir = os.path.join(tempfile.gettempdir(), f'ranoptics_bmad_{key}')
+    staged_main = os.path.join(staging_dir, os.path.basename(bmad_lib))
+
+    # Reuse only if everything in it still resolves; a moved or upgraded Bmad
+    # install leaves dangling symlinks, and those must not be handed to dlopen.
+    if os.path.isdir(staging_dir):
+        entries = os.listdir(staging_dir)
+        if entries and os.path.exists(staged_main) and \
+           all(os.path.exists(os.path.join(staging_dir, f)) for f in entries):
+            _preload_staged_libs(staging_dir, os.path.basename(bmad_lib))
+            return staged_main
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    def _link(src, dst):
+        if os.path.exists(dst) or not os.path.isfile(src):
+            return False
+        try:
+            os.symlink(src, dst)
+        except OSError:
             try:
-                os.symlink(src, dst)
+                shutil.copy2(src, dst)
             except OSError:
-                try:
-                    import shutil
-                    shutil.copy2(src, dst)
-                except OSError:
-                    pass
+                return False
+        return True
+
+    _link(bmad_lib, staged_main)
+
+    if _elf_needed(bmad_lib) is None:
+        # Not ELF (macOS .dylib, Windows .dll) or unreadable: fall back to the
+        # old coarse sweep rather than staging nothing at all.
+        for src_dir in cand_dirs:
+            for fname in os.listdir(src_dir):
+                if _is_shared_lib_name(fname):
+                    _link(os.path.join(src_dir, fname),
+                          os.path.join(staging_dir, fname))
+    else:
+        # Walk the real DT_NEEDED closure. Anything not found in cand_dirs is a
+        # system library (libc, libm, ...) and resolves on its own, so it's
+        # marked seen and skipped rather than staged.
+        seen = {os.path.basename(bmad_lib)}
+        queue = [bmad_lib]
+        while queue:
+            for soname in (_elf_needed(queue.pop()) or []):
+                if soname in seen:
+                    continue
+                seen.add(soname)
+                for d in cand_dirs:
+                    src = os.path.join(d, soname)
+                    if os.path.isfile(src):
+                        if _link(src, os.path.join(staging_dir, soname)):
+                            queue.append(src)
+                        break
+
     _preload_staged_libs(staging_dir, os.path.basename(bmad_lib))
-    return os.path.join(staging_dir, os.path.basename(bmad_lib))
+    return staged_main
 
 def _make_tao(cmd, bmad_lib=None, bmad_extra_paths=None):
     """Construct a pytao.Tao instance, optionally pointed at an explicit

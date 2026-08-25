@@ -387,6 +387,8 @@ def plot_optics(
     grid_layout=None,    # dict: {'rows':R,'cols':C,'cells':[{'row':r,'col':c,'spec':...,'source':uid,'span_cols':n}]}
     shared_xaxis=True,   # if True, link x-axes of all data panels (pan/zoom synced)
     hide_labels=False,   # if True, suppress all axis title labels on the plot
+    smooth_curves=False, # cosmetic spline smoothing of optics curves — display only,
+    smooth_amount=1.0,   # does not change the underlying data or CSV export (0–1.3)
     bar_elem_ratio=0.5,  # fraction of bar y-axis span for element height (0.4*0.5=0.2 = original default)
                          # When set, renders a grid instead of the vertical panels stack.
                          # 'source': None=all selected universes, integer=specific universe uid
@@ -401,6 +403,8 @@ def plot_optics(
     """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
+    from core import panels as _panels_mod
+    _panels_mod._set_line_smoothing(smooth_curves, smooth_amount)
 
     def _log(m): (log_fn(m+'\n') if log_fn else print(m))
 

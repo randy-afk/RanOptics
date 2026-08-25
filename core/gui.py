@@ -57,6 +57,10 @@ class RanOpticsGUI(QMainWindow):
     ]
     _RECENT_FILE = Path.home() / ".ranoptics_recent.json"
     _PRESET_FILE = Path.home() / ".ranoptics_presets.json"
+    # Machine-level settings, deliberately separate from presets: these are
+    # paths into a local Bmad install, so they'd be meaningless in a preset
+    # copied to another machine.
+    _SETTINGS_FILE = Path.home() / ".ranoptics_settings.json"
     _MAX_RECENT  = 8
 
     def __init__(self):
@@ -191,7 +195,7 @@ class RanOpticsGUI(QMainWindow):
         self._hdr_opt.setStyleSheet(f"color: {_th.FG}; background: transparent;")
         nr.addWidget(self._hdr_ran); nr.addWidget(self._hdr_opt); nr.addStretch()
         tv.addWidget(name_row)
-        self._hdr_sub = QLabel("Accelerator Optics Plotter  ·  v2.1.3"); self._hdr_sub.setFont(FONT_MONO)
+        self._hdr_sub = QLabel("Accelerator Optics Plotter  ·  v2.2.0"); self._hdr_sub.setFont(FONT_MONO)
         self._hdr_sub.setStyleSheet(f"color: {_th.FG_DIM}; background: transparent; border-bottom: 1px solid {_th.COPPER}; padding-bottom: 1px;")
         tv.addWidget(self._hdr_sub)
         row.addWidget(txt)
@@ -241,6 +245,16 @@ class RanOpticsGUI(QMainWindow):
         self._btn_light.clicked.connect(lambda: self._switch_theme("light"))
         self._btn_dark.clicked.connect(lambda: self._switch_theme("dark"))
         tl.addWidget(self._btn_light); tl.addWidget(self._btn_dark)
+
+        # Palette picker, beside the mode toggle: mode and theme are the two
+        # axes of the same choice, so they belong together.
+        self._theme_dd = QComboBox(); self._theme_dd.setFont(FONT_SMALL)
+        self._theme_dd.setFixedHeight(26)
+        self._theme_dd.addItems(list(_th.THEMES.keys()))
+        self._theme_dd.setCurrentText(_th._current_theme)
+        self._theme_dd.setStyleSheet(self._theme_dd_ss())
+        self._theme_dd.currentTextChanged.connect(self._switch_palette)
+        tl.addWidget(self._theme_dd)
         tog_wrap = QWidget(); tog_wrap.setStyleSheet("background: transparent;")
         tw = QHBoxLayout(tog_wrap); tw.setContentsMargins(0,0,0,0)
         tw.addStretch(); tw.addWidget(self._tog_widget)
@@ -249,9 +263,33 @@ class RanOpticsGUI(QMainWindow):
         row.addWidget(rf)
         self._root_layout.addWidget(self._header_widget)
 
-    def _switch_theme(self, mode):
+    def _theme_dd_ss(self):
+        """Stylesheet for the header palette picker (rebuilt on every switch)."""
+        return f"""
+            QComboBox {{
+                background: transparent; border: 1px solid transparent;
+                border-radius: 6px; color: {_th.FG_DIM}; padding: 4px 8px;
+            }}
+            QComboBox:hover {{ background: {_th.SURFACE2}; color: {_th.FG}; }}
+            QComboBox::drop-down {{ border: none; width: 14px; }}
+            QComboBox::down-arrow {{ width: 0; height: 0; }}
+            QComboBox QAbstractItemView {{
+                background: {_th.PANEL}; color: {_th.FG};
+                border: 1px solid {_th.BORDER}; border-radius: 6px; padding: 2px;
+                selection-background-color: {_th.ACCENT}; selection-color: {_th.AINK};
+                outline: none;
+            }}
+        """
+
+    def _switch_palette(self, name):
+        """Header dropdown: change palette, keeping the current light/dark mode."""
+        from core import themes as _t
+        self._switch_theme(_t._current_mode, theme=name)
+
+    def _switch_theme(self, mode, theme=None):
         from core import themes as _th
-        _th.apply_theme(mode)
+        _th.apply_theme(theme, mode)
+        self._save_settings()
         th = _th  # shorthand
         # Update QApplication global stylesheet — covers most widgets
         from PySide6.QtWidgets import QApplication
@@ -295,6 +333,11 @@ class RanOpticsGUI(QMainWindow):
         # Update toggle button states
         self._btn_light.setChecked(mode == 'light')
         self._btn_dark.setChecked(mode == 'dark')
+        # Keep the picker in sync without re-entering _switch_palette
+        self._theme_dd.blockSignals(True)
+        self._theme_dd.setCurrentText(th._current_theme)
+        self._theme_dd.blockSignals(False)
+        self._theme_dd.setStyleSheet(self._theme_dd_ss())
         self._restyle()
 
     def _restyle(self):
@@ -860,6 +903,9 @@ class RanOpticsGUI(QMainWindow):
                   "assembled from system packages instead of a single conda environment.")
         layout.addWidget(self._tao_widget)
         self._tao_widget.hide()
+        self._load_settings()    # restore the Bmad paths before the window is shown
+        self.w_bmad_lib.editingFinished.connect(self._save_settings)
+        self.w_bmad_extra.editingFinished.connect(self._save_settings)
         self._update_tao_rows()  # 'tao' is the default backend, so sync visibility now —
                                   # currentTextChanged won't fire for a value that's already selected
 
@@ -1120,12 +1166,20 @@ class RanOpticsGUI(QMainWindow):
             ("Markers in floor",   lambda c: setattr(self, 'w_show_markers',      c)),
             ("Markers in bar",     lambda c: setattr(self, 'w_show_markers_bar',  c)),
             ("Equal aspect (floor)", lambda c: setattr(self, 'w_equal_aspect',    c)),
+            ("Smooth curves",      lambda c: setattr(self, 'w_smooth_curves',     c)),
         ]
         for i, (lbl_txt, setter) in enumerate(_chk_items):
             cb = QCheckBox(lbl_txt); cb.setFont(FONT_MAIN); cb.setStyleSheet(_th._CHK_SS)
             setter(cb)
             _disp_g.addWidget(cb, i // 3, i % 3)
         layout.addWidget(_disp_w)
+
+        _sm_r = _row(layout); _lbl(_sm_r, "Smoothing amount")
+        self.w_smooth_amount = _ent(_sm_r, width=70, placeholder="1.0")
+        _help(layout, "Cosmetic only — smooths the drawn line between computed points, it does "
+                      "not add physics. 0 to 1.3. Can overshoot near a waist and rounds off real "
+                      "discontinuities (alpha genuinely jumps at a thin quad), so leave it off "
+                      "when reading values off the plot. Exported CSV data is unaffected.")
 
         # ── Font Sizes ───────────────────────────────────────────────────────
         _sec(layout, "Font Sizes")
@@ -2085,7 +2139,9 @@ class RanOpticsGUI(QMainWindow):
             self, "Select Bmad shared library", "",
             "Shared libraries (*.so *.dylib *.dll);;All files (*.*)",
             options=QFileDialog.DontUseNativeDialog)
-        if f: self.w_bmad_lib.setText(f)
+        if f:
+            self.w_bmad_lib.setText(f)
+            self._save_settings()   # setText doesn't emit editingFinished
 
     def _browse_tunnel(self):
         f, _ = QFileDialog.getOpenFileName(
@@ -2148,6 +2204,8 @@ class RanOpticsGUI(QMainWindow):
             universes=self._get_selected_universes(),
             uni_label_overrides=self._get_uni_label_overrides(),
             madx_survey=self.w_madx_survey.text().strip() or None,
+            smooth_curves=self.w_smooth_curves.isChecked(),
+            smooth_amount=float(self.w_smooth_amount.text().strip() or 1.0),
             bmad_lib=self.w_bmad_lib.text().strip() or None,
             bmad_extra_paths=_parse_extra_paths(self.w_bmad_extra.text().strip()),
             show_tune=self.w_show_tune.isChecked(),
@@ -2421,6 +2479,44 @@ class RanOpticsGUI(QMainWindow):
             act.triggered.connect(lambda _=False, f=p: self.w_input.setText(f))
             self._recent_menu.addAction(act)
 
+    # ── App settings ──────────────────────────────────────────────────────────
+    # Sticky machine-level values, restored automatically at startup so the
+    # Bmad paths don't have to be re-entered every launch. Kept out of presets
+    # on purpose — see _SETTINGS_FILE.
+
+    @classmethod
+    def _read_settings(cls):
+        """Read the settings file. Used before the window exists, to pick the
+        theme, so it has to work without an instance."""
+        try:
+            import json
+            data = json.loads(cls._SETTINGS_FILE.read_text())
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _load_settings(self):
+        data = self._read_settings()
+        if not data:
+            return
+        self.w_bmad_lib.setText(str(data.get('bmad_lib', '')))
+        self.w_bmad_extra.setText(str(data.get('bmad_extra_paths', '')))
+
+    def _save_settings(self):
+        import json, core.themes as _t
+        # Called during _switch_theme, which can run before the Bmad widgets
+        # exist, so read those defensively.
+        data = {
+            'bmad_lib':         (self.w_bmad_lib.text().strip()
+                                 if hasattr(self, 'w_bmad_lib') else ''),
+            'bmad_extra_paths': (self.w_bmad_extra.text().strip()
+                                 if hasattr(self, 'w_bmad_extra') else ''),
+            'app_theme':        _t._current_theme,
+            'app_mode':         _t._current_mode,
+        }
+        try: self._SETTINGS_FILE.write_text(json.dumps(data, indent=2))
+        except Exception: pass   # never block the GUI on a settings write
+
     # ── Presets ───────────────────────────────────────────────────────────────
 
     def _load_presets(self):
@@ -2468,9 +2564,11 @@ class RanOpticsGUI(QMainWindow):
             'equal_aspect':    self.w_equal_aspect.isChecked(),
             'show_titles':     self.w_show_titles.isChecked(),
             'panel_spacing':   self.w_panel_spacing.text().strip(),
+            'smooth_curves':   self.w_smooth_curves.isChecked(),
+            'smooth_amount':   self.w_smooth_amount.text().strip(),
             'madx_survey':     self.w_madx_survey.text().strip(),
-            'bmad_lib':        self.w_bmad_lib.text().strip(),
-            'bmad_extra_paths': self.w_bmad_extra.text().strip(),
+            # bmad_lib / bmad_extra_paths deliberately absent: they're
+            # machine-level settings, not portable plot config.
             'elem_colors':     dict(self._elem_colors),
             'shared_xaxis':    self.w_shared_xaxis.isChecked(),
             'grid_enabled':    self._grid_enabled,
@@ -2502,7 +2600,8 @@ class RanOpticsGUI(QMainWindow):
             'fs_axis': '', 'fs_tick': '', 'fs_title': '', 'fs_annot': '', 'fs_legend': '',
             'show_xz': True, 'show_yz': True, 'equal_aspect': False,
             'show_titles': True, 'panel_spacing': '80', 'madx_survey': '',
-            'bmad_lib': '', 'bmad_extra_paths': '', 'elem_colors': {}, 'shared_xaxis': True,
+            'smooth_curves': False, 'smooth_amount': '1.0',
+            'elem_colors': {}, 'shared_xaxis': True,
             'grid_enabled': False, 'cell_srange_on': False, 'grid_size': '2x2',
         }
 
@@ -2544,10 +2643,12 @@ class RanOpticsGUI(QMainWindow):
         _sc(self.w_equal_aspect, 'equal_aspect')
 
         _sc(self.w_show_titles, 'show_titles')
+        _sc(self.w_smooth_curves, 'smooth_curves')
         _st(self.w_panel_spacing, 'panel_spacing')
+        _st(self.w_smooth_amount, 'smooth_amount')
         if 'madx_survey' in data: self.w_madx_survey.setText(str(data.get('madx_survey', '')))
-        if 'bmad_lib' in data: self.w_bmad_lib.setText(str(data.get('bmad_lib', '')))
-        if 'bmad_extra_paths' in data: self.w_bmad_extra.setText(str(data.get('bmad_extra_paths', '')))
+        # Bmad paths are intentionally not touched here: they live in
+        # _SETTINGS_FILE, so loading a preset must not overwrite or clear them.
 
         if 'emit_type' in data:
             is_norm = str(data['emit_type']).lower() == 'normalized'
