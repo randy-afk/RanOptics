@@ -2,6 +2,11 @@
 All notable changes to RanOptics will be documented here.
 Format: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`
 
+## [2.2.1] - 2026-08
+### Fixed
+- **macOS standalone build: Tao/Bmad now loads.** Reported from a real macOS test of 2.2.0: `Symbol not found: _EVP_MD_CTX_get_size_ex, referenced from libs2n.1.0.0.dylib, expected in _MEIxxxx/libcrypto.3.dylib`. Same root cause as the Linux fix in 2.1.2 — Bmad's dependency chain resolves against PyInstaller's own bundled OpenSSL, which is older than the conda-forge OpenSSL Bmad was built against. The OpenSSL bundling step is now applied to macOS as well as Linux, using `libssl.3.dylib`/`libcrypto.3.dylib` and selecting the micromamba build from the runner's architecture (`osx-arm64` or `osx-64`).
+- Build now asserts that the OpenSSL it is about to bundle actually carries the symbol each platform needs (`OPENSSL_3.2.0` on Linux, `EVP_MD_CTX_get_size_ex` on macOS) rather than trusting the version pin. A version range alone proved insufficient: conda-forge's newer OpenSSL requires `__osx >=11.0`, and a solve that cannot see the real macOS version silently falls back several minor versions to a build missing the needed symbol. The build now fails loudly at that point instead of producing a binary that only breaks when a user loads Bmad.
+
 ## [2.2.0] - 2026-08
 ### Added
 - **App themes.** Five colour themes (Petrol, Classic Green, Sulfur Sea, Ultraviolet, Oxblood), each with matched light and dark palettes. Picker sits in the header beside the existing light/dark toggle; both apply live, no restart. Theme and mode persist between sessions. Petrol is the new default. Every palette assigns colours to fixed roles (primary action, secondary action, section label, alert) rather than using them decoratively, which is what keeps a multi-colour theme readable.

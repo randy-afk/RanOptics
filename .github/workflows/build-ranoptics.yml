@@ -78,7 +78,7 @@ jobs:
           pip install pyinstaller
           pip install numpy plotly PySide6 "kaleido==1.2.0" pytao
 
-      - name: Fetch modern OpenSSL for bundling (Linux only)
+      - name: Fetch modern OpenSSL for bundling (Linux + macOS)
         # PyInstaller auto-bundles whatever libssl.so.3/libcrypto.so.3 the
         # runner's Python is linked against (Ubuntu's system OpenSSL, capped
         # at symbol version OPENSSL_3.0.x). Python's own ssl/hashlib modules
@@ -98,12 +98,47 @@ jobs:
         # SONAME libssl.so.3, because that's what both Python's _ssl and
         # Bmad's libcurl.so.4 are linked against — a 4.x copy satisfies
         # neither. >=3.2 guarantees the OPENSSL_3.2.0 symbols libcurl needs.
-        if: runner.os == 'Linux'
+        # macOS hits the identical problem with different names: a real user's
+        # build failed with "Symbol not found: _EVP_MD_CTX_get_size_ex,
+        # referenced from libs2n.1.0.0.dylib, expected in
+        # _MEIxxxx/libcrypto.3.dylib" — Bmad's dependency chain resolving
+        # against PyInstaller's bundled OpenSSL, which was too old to have it.
+        # Same fix, .dylib names, and the micromamba build is chosen from the
+        # runner's own architecture since macos-latest is arm64 but x86_64
+        # runners still exist.
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        shell: bash
         run: |
-          curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj bin/micromamba
+          set -euo pipefail
+          case "${{ runner.os }}-$(uname -m)" in
+            Linux-*)          MAMBA_PLAT=linux-64  ;;
+            macOS-arm64)      MAMBA_PLAT=osx-arm64 ;;
+            macOS-x86_64)     MAMBA_PLAT=osx-64    ;;
+            *) echo "unsupported platform: ${{ runner.os }}-$(uname -m)"; exit 1 ;;
+          esac
+          echo "micromamba platform: $MAMBA_PLAT"
+          curl -Ls "https://micro.mamba.pm/api/micromamba/$MAMBA_PLAT/latest" | tar -xj bin/micromamba
           ./bin/micromamba create -p ./openssl_env -c conda-forge "openssl>=3.2,<4" -y
-          test -f ./openssl_env/lib/libssl.so.3
-          test -f ./openssl_env/lib/libcrypto.so.3
+          # Assert the files exist AND that the copy we're about to bundle
+          # actually carries the symbol each platform failed on. A version pin
+          # alone isn't enough: the solve can quietly land on an older build
+          # (conda-forge's newer openssl requires __osx >=11.0, and a solve that
+          # can't see the real macOS version falls back several minor versions).
+          # Checking the symbol fails the build loudly instead of shipping a
+          # binary that only breaks once a user loads Bmad.
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            test -f ./openssl_env/lib/libssl.so.3
+            test -f ./openssl_env/lib/libcrypto.so.3
+            # libcurl.so.4 in a conda Bmad install needs this version tag
+            strings ./openssl_env/lib/libcrypto.so.3 | grep -q 'OPENSSL_3\.2\.0' \
+              || { echo "bundled libcrypto lacks OPENSSL_3.2.0"; exit 1; }
+          else
+            test -f ./openssl_env/lib/libssl.3.dylib
+            test -f ./openssl_env/lib/libcrypto.3.dylib
+            # libs2n in a conda Bmad install needs this symbol (v2.2.0 failure)
+            strings ./openssl_env/lib/libcrypto.3.dylib | grep -q 'EVP_MD_CTX_get_size_ex' \
+              || { echo "bundled libcrypto lacks EVP_MD_CTX_get_size_ex"; exit 1; }
+          fi
 
       - name: Build Executable with PyInstaller
         shell: bash
@@ -112,6 +147,9 @@ jobs:
           if [ "${{ runner.os }}" = "Linux" ]; then
             EXTRA_ARGS+=(--add-binary "./openssl_env/lib/libssl.so.3:.")
             EXTRA_ARGS+=(--add-binary "./openssl_env/lib/libcrypto.so.3:.")
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            EXTRA_ARGS+=(--add-binary "./openssl_env/lib/libssl.3.dylib:.")
+            EXTRA_ARGS+=(--add-binary "./openssl_env/lib/libcrypto.3.dylib:.")
           fi
           pyinstaller --onefile --noconsole --name RanOptics \
             --collect-all PySide6 --collect-all plotly --collect-all kaleido --collect-all pytao \
